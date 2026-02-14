@@ -1,0 +1,31 @@
+﻿{
+    "query":  "What are the risk factors?",
+    "top_k":  5,
+    "results":  [
+                    {
+                        "chunk_id":  "chunk_1696",
+                        "score":  0.5633,
+                        "snippet":  "any to adapt to contingencies and stay ahead of the curve. â¢ Key Business Goals: Based on the goals identified by the top management and Board and the level of acceptable risk, we place frameworks, processes and controls to facilitate their achievement. â¢ Risk Identification: Determining uncertainties, which could potentially impact the achievement of business objectives. â¢ Risk Assessment: Evaluating risks identified and possible impact. â¢ Risk Treatment: Mitigate, transfer, tolerate, or termin"
+                    },
+                    {
+                        "chunk_id":  "chunk_1133",
+                        "score":  0.5385,
+                        "snippet":  "Committee Meeting. \u0007The Company, through its risk management process, aims to contain the risks within its risk appetite. There are no risks which in the opinion of the Board threaten the existence of the Company. However, some of the risks which may pose challenges are set out in the Management Discussion and Analysis which forms part of this Annual Report. \u0007The Risk Management Policy is available on the Companyâs website and are accessible through weblink. 9. \u0007Particulars of Loan Given, Invest"
+                    },
+                    {
+                        "chunk_id":  "chunk_1680",
+                        "score":  0.5328,
+                        "snippet":  "so revised at frequent intervals. The Company, through its risk management process, aims to contain the risks within its risk appetite. There are no risks which in the opinion of the Board threatens the existence of the Company. However, some of the risks which may pose challenges are set out in the Management Discussion and Analysis which forms part of this Annual Report. \u0007The Risk Management Policy is available on the website of the Company and can be accessed through weblink. ESG covered unde"
+                    },
+                    {
+                        "chunk_id":  "chunk_1132",
+                        "score":  0.5285,
+                        "snippet":  "of Risk Management Framework of the Company are: (i) \u0007A well-defined risk management policy; (ii) \u0007Periodic assessment and prioritisation of risks that affect the business of the Company; (iii) \u0007Development and deployment of risk mitigation plans; (iv) \u0007Focus on both the results and efforts required to mitigate the risks; (v) \u0007Defined review and monitoring mechanism of risk registers; (vi) \u0007Presentations by the risk owners at the Risk Management Committee Meeting. \u0007The Company, through its risk "
+                    },
+                    {
+                        "chunk_id":  "chunk_400",
+                        "score":  0.5255,
+                        "snippet":  "me. â¢ Risk impact: This refers to the extent of damage or effect that an occurrence of a specific risk event would have on an organisationâs objectives. â¢ Risk appetite: This represents the level of risk that an organization is willing to accept in order to achieve its strategic objectives. â¢ Risk rating: Risk likelihood x Risk impact Risk Likelihood Impact Appetite Risk Rating Threats to Information Security Likely Moderate Low Technological Lag and Inadequate Adaptation Possible Moderate Moder"
+                    }
+                ]
+}

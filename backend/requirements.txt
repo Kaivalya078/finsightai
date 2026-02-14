@@ -1,0 +1,19 @@
+# FinSight AI - Phase 1 + Phase 2 Dependencies
+# Install with: pip install -r requirements.txt
+
+# Web Framework
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# PDF Processing
+pymupdf>=1.23.0
+
+# Embeddings & Vector Search
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4
+
+# LLM Generation (Phase 2)
+openai>=1.0.0
+
+# Configuration
+python-dotenv>=1.0.0
