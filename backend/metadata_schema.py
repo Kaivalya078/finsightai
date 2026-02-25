@@ -128,6 +128,9 @@ class DocumentRecord:
     vector_id_start and vector_id_end track where this document's
     chunks live in the FAISS index, enabling document-level operations
     (e.g., marking all chunks as superseded).
+    
+    Stage 2: source_path/source_url added for rebuild capability.
+    At least one must be set for new documents.
     """
     document_id: str                    # e.g. "demo_company_DRHP_2024_v1"
     pdf_path: str                       # original file path
@@ -138,6 +141,15 @@ class DocumentRecord:
     indexed_at: str = field(            # ISO timestamp
         default_factory=lambda: datetime.now().isoformat()
     )
+    # Stage 2: Persistent source references for corpus rebuild
+    source_path: Optional[str] = None   # CLI ingestion source (local path)
+    source_url: Optional[str] = None    # future crawler source (URL)
+    ingestion_timestamp: str = field(   # when this document was ingested
+        default_factory=lambda: datetime.now().isoformat()
+    )
+
+    # Stage 3 addition — backward compatible: old registry files deserialize safely
+    status: str = "active"   # "active" | "inactive"
 
 
 # =============================================================================
@@ -162,6 +174,25 @@ class EntityRecord:
         default_factory=list
     )
     parent_entity: Optional[str] = None         # for subsidiary relationships
+
+
+# =============================================================================
+# RETRIEVAL RESULT
+# =============================================================================
+
+@dataclass
+class RetrievalResult:
+    """
+    Represents a single retrieval result.
+    
+    Attributes:
+        chunk_id: Which chunk was retrieved
+        score: Similarity score (higher = more similar)
+        snippet: The text content of the chunk
+    """
+    chunk_id: str
+    score: float
+    snippet: str
 
 
 # =============================================================================
