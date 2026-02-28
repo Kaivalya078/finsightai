@@ -1,12 +1,9 @@
 /**
- * ChatHeader Component
- * =====================
- * Top bar for the chat area showing conversation title and model info.
+ * ChatHeader — shows model info only, no title (title lives in sidebar)
  */
+import { TrendingUp, PanelLeftOpen } from 'lucide-react';
 
-import { Sparkles, PanelLeftOpen } from 'lucide-react';
-
-export default function ChatHeader({ title, onToggleSidebar, sidebarCollapsed }) {
+export default function ChatHeader({ onToggleSidebar, sidebarCollapsed }) {
     return (
         <header className="chat-header">
             {sidebarCollapsed && (
@@ -20,16 +17,15 @@ export default function ChatHeader({ title, onToggleSidebar, sidebarCollapsed })
             )}
 
             <div className="chat-header-info">
-                <h2 className="chat-header-title">{title || 'New Chat'}</h2>
                 <div className="chat-header-model">
-                    <Sparkles size={12} />
-                    <span>GPT-4o-mini · RAG</span>
+                    <TrendingUp size={11} />
+                    <span>GPT-4o-mini · RAG Pipeline · NIFTY 50 Corpus</span>
                 </div>
             </div>
 
             <div className="chat-header-status">
-                <span className="status-dot"></span>
-                <span>Online</span>
+                <span className="status-dot" />
+                <span>Analyst Ready</span>
             </div>
         </header>
     );

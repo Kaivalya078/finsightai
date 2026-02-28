@@ -7,14 +7,14 @@
 
 const STATIC_USERS = [
     {
-        email: 'demo@finsight.ai',
+        email: 'demo@cognifin.ai',
         password: 'demo123',
         name: 'Demo User',
         avatar: 'DU'
     }
 ];
 
-const AUTH_KEY = 'finsight_auth';
+const AUTH_KEY = 'cognifin_auth';
 
 /**
  * Validate credentials against static users

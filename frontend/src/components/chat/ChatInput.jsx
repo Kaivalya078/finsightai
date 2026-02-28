@@ -38,28 +38,30 @@ export default function ChatInput({ onSend, isLoading }) {
 
     return (
         <form className="chat-input-form" onSubmit={handleSubmit}>
-            <div className="chat-input-wrapper">
-                <textarea
-                    ref={textareaRef}
-                    value={question}
-                    onChange={(e) => setQuestion(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Ask about the financial document..."
-                    disabled={isLoading}
-                    rows={1}
-                />
-                <button
-                    type="submit"
-                    className="chat-send-btn"
-                    disabled={isLoading || !question.trim()}
-                    title="Send message"
-                >
-                    <Send size={18} />
-                </button>
+            <div className="chat-input-inner">
+                <div className="chat-input-wrapper">
+                    <textarea
+                        ref={textareaRef}
+                        value={question}
+                        onChange={(e) => setQuestion(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Ask about the financial document..."
+                        disabled={isLoading}
+                        rows={1}
+                    />
+                    <button
+                        type="submit"
+                        className="chat-send-btn"
+                        disabled={isLoading || !question.trim()}
+                        title="Send message"
+                    >
+                        <Send size={18} />
+                    </button>
+                </div>
+                <p className="chat-input-hint">
+                    Press Enter to send, Shift+Enter for new line
+                </p>
             </div>
-            <p className="chat-input-hint">
-                Press Enter to send, Shift+Enter for new line
-            </p>
         </form>
     );
 }

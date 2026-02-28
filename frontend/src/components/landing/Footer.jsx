@@ -10,7 +10,7 @@ export default function Footer() {
                 <div className="footer-brand">
                     <div className="footer-logo">
                         <span className="logo-icon">◈</span>
-                        <span className="logo-text">FinSight AI</span>
+                        <span className="logo-text">Cognifin</span>
                     </div>
                     <p className="footer-tagline">
                         Unlock financial intelligence with AI-powered document analysis
@@ -30,7 +30,7 @@ export default function Footer() {
 
                 {/* Copyright */}
                 <div className="footer-copyright">
-                    <p>© {currentYear} FinSight AI. Built for financial analysis.</p>
+                    <p>© {currentYear} Cognifin. Built for financial analysis.</p>
                 </div>
             </div>
         </footer>

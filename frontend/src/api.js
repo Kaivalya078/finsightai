@@ -2,37 +2,44 @@
  * FinSight AI - API Client
  * ========================
  * Handles communication with the FastAPI backend.
- * 
- * Only one function: askQuestion()
- * Sends POST /chat and returns the response.
  */
 
-// Backend URL (Vite dev server runs on 5173, FastAPI on 8000)
-const API_BASE = "http://localhost:8000";
+// Base URL from Vite env variable, fallback to localhost
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+
+/**
+ * Check backend health status.
+ * Returns a promise resolving to the health JSON.
+ */
+export async function checkHealth() {
+    const response = await fetch(`${API_BASE}/health`);
+    if (!response.ok) {
+        throw new Error(`Health check failed: ${response.status}`);
+    }
+    return response.json();
+}
 
 /**
  * Send a question to the RAG backend and get a grounded answer.
- * 
- * @param {string} question - The user's question
- * @returns {Promise<{answer: string, citations: string[], evidence: Array}>}
- * @throws {Error} If the request fails
+ * Includes a timeout of 30 seconds.
  */
 export async function askQuestion(question) {
-    const response = await fetch(`${API_BASE}/chat`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ question }),
-    });
-
-    // Handle HTTP errors
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        const message = errorData?.detail || `Server error (${response.status})`;
-        throw new Error(message);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 min — RAG pipeline can be slow
+    try {
+        const response = await fetch(`${API_BASE}/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question }),
+            signal: controller.signal,
+        });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => null);
+            const message = errorData?.detail || `Server error (${response.status})`;
+            throw new Error(message);
+        }
+        return response.json();
+    } finally {
+        clearTimeout(timeoutId);
     }
-
-    // Parse and return the JSON response
-    return response.json();
 }

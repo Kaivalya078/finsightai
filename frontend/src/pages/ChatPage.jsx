@@ -7,14 +7,15 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { Toaster, toast } from 'react-hot-toast';
-import { askQuestion } from '../api';
+import { askQuestion, checkHealth } from '../api';
 import useConversations from '../hooks/useConversations';
 import Sidebar from '../components/chat/Sidebar';
 import ChatHeader from '../components/chat/ChatHeader';
 import MessageList from '../components/chat/MessageList';
 import ChatInput from '../components/chat/ChatInput';
-import { Sparkles, MessageSquare } from 'lucide-react';
+import { Sparkles, MessageSquare, TrendingUp, BarChart2, Users, DollarSign } from 'lucide-react';
 import '../styles/chat.css';
+import '../styles/api.css';
 
 export default function ChatPage() {
     const {
@@ -25,10 +26,23 @@ export default function ChatPage() {
         addMessage,
         selectConversation,
         deleteConversation,
+        renameConversation,
     } = useConversations();
 
     const [isLoading, setIsLoading] = useState(false);
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+    const [backendDown, setBackendDown] = useState(false);
+    const [bannerDismissed, setBannerDismissed] = useState(false);
+
+    // --- Health Check on Mount ---
+    useEffect(() => {
+        checkHealth()
+            .then(() => setBackendDown(false))
+            .catch(() => {
+                setBackendDown(true);
+                setBannerDismissed(false);
+            });
+    }, []);
 
     // --- Keyboard Shortcuts ---
     useEffect(() => {
@@ -89,7 +103,7 @@ export default function ChatPage() {
     );
 
     const handleNewChat = () => {
-        createConversation();
+        selectConversation(null);   // just show the welcome screen — no conversation created yet
     };
 
     return (
@@ -108,74 +122,95 @@ export default function ChatPage() {
                 }}
             />
 
-            {/* Sidebar */}
-            <Sidebar
-                conversations={conversations}
-                activeId={activeId}
-                onSelect={selectConversation}
-                onNewChat={handleNewChat}
-                onDelete={deleteConversation}
-                isCollapsed={sidebarCollapsed}
-                onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
-            />
+            {/* Health Banner */}
+            {backendDown && !bannerDismissed && (
+                <div className="health-banner">
+                    <span className="health-banner-icon">⚠️</span>
+                    <span className="health-banner-text">
+                        <strong>Backend unavailable.</strong> Make sure the FastAPI server is running at{' '}
+                        <code>http://localhost:8000</code> before sending questions.
+                    </span>
+                    <button
+                        className="health-banner-dismiss"
+                        onClick={() => setBannerDismissed(true)}
+                        title="Dismiss"
+                    >
+                        ×
+                    </button>
+                </div>
+            )}
 
-            {/* Main Chat Area */}
-            <main className={`chat-main ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-                {activeConversation && activeConversation.messages.length > 0 ? (
-                    <>
-                        <ChatHeader
-                            title={activeConversation.title}
-                            onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-                            sidebarCollapsed={sidebarCollapsed}
-                        />
-                        <MessageList
-                            messages={activeConversation.messages}
-                            isLoading={isLoading}
-                        />
-                        <ChatInput onSend={handleSend} isLoading={isLoading} />
-                    </>
-                ) : (
-                    /* Empty State / Welcome */
-                    <div className="chat-welcome">
-                        <div className="chat-welcome-content">
-                            <div className="chat-welcome-icon">
-                                <Sparkles size={40} />
-                            </div>
-                            <h1>FinSight AI</h1>
-                            <p>Your AI-powered financial document analyst</p>
+            {/* Sidebar + Main row */}
+            <div className="chat-body">
+                {/* Sidebar */}
+                <Sidebar
+                    conversations={conversations}
+                    activeId={activeId}
+                    onSelect={selectConversation}
+                    onNewChat={handleNewChat}
+                    onDelete={deleteConversation}
+                    onRename={renameConversation}
+                    isCollapsed={sidebarCollapsed}
+                    onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+                />
 
-                            <div className="chat-welcome-prompts">
-                                <h3>Try asking:</h3>
-                                <div className="chat-prompt-cards">
-                                    {[
-                                        'What are the key risk factors?',
-                                        'Who are the promoters?',
-                                        'What is the business overview?',
-                                        'What are the financial highlights?',
-                                    ].map((prompt) => (
-                                        <button
-                                            key={prompt}
-                                            className="chat-prompt-card"
-                                            onClick={() => handleSend(prompt)}
-                                        >
-                                            <MessageSquare size={16} />
-                                            <span>{prompt}</span>
-                                        </button>
-                                    ))}
+                {/* Main Chat Area */}
+                <main className={`chat-main ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+                    {activeConversation && activeConversation.messages.length > 0 ? (
+                        <>
+                            <ChatHeader
+                                onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
+                                sidebarCollapsed={sidebarCollapsed}
+                            />
+                            <MessageList
+                                messages={activeConversation.messages}
+                                isLoading={isLoading}
+                            />
+                            <ChatInput onSend={handleSend} isLoading={isLoading} />
+                        </>
+                    ) : (
+                        /* Empty State / Welcome */
+                        <div className="chat-welcome">
+                            <div className="chat-welcome-content">
+                                <div className="chat-welcome-icon">
+                                    <TrendingUp size={38} />
+                                </div>
+                                <h1>Cognifin</h1>
+                                <p>Your AI-powered financial analyst — trained on NIFTY 50 annual reports. Ask about financials, risk factors, shareholding, and market insights.</p>
+
+                                <div className="chat-welcome-prompts">
+                                    <h3>Suggested questions</h3>
+                                    <div className="chat-prompt-cards">
+                                        {[
+                                            { icon: <BarChart2 size={15} />, text: 'What is the revenue and profit trend?' },
+                                            { icon: <TrendingUp size={15} />, text: 'What are the key risk factors?' },
+                                            { icon: <Users size={15} />, text: 'Who are the promoters and their shareholding?' },
+                                            { icon: <DollarSign size={15} />, text: 'Summarise the financial highlights' },
+                                        ].map(({ icon, text }) => (
+                                            <button
+                                                key={text}
+                                                className="chat-prompt-card"
+                                                onClick={() => handleSend(text)}
+                                            >
+                                                {icon}
+                                                <span>{text}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Keyboard Shortcuts Hint */}
+                                <div className="chat-shortcuts">
+                                    <span>⌨️ Shortcuts:</span>
+                                    <kbd>Ctrl+N</kbd> New Chat
+                                    <kbd>Ctrl+B</kbd> Toggle Sidebar
                                 </div>
                             </div>
-
-                            {/* Keyboard Shortcuts Hint */}
-                            <div className="chat-shortcuts">
-                                <span>⌨️ Shortcuts:</span>
-                                <kbd>Ctrl+N</kbd> New Chat
-                                <kbd>Ctrl+B</kbd> Toggle Sidebar
-                            </div>
+                            <ChatInput onSend={handleSend} isLoading={isLoading} />
                         </div>
-                        <ChatInput onSend={handleSend} isLoading={isLoading} />
-                    </div>
-                )}
-            </main>
+                    )}
+                </main>
+            </div>
         </div>
     );
 }

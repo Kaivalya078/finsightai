@@ -25,13 +25,8 @@ export default function Navbar() {
             <div className="nav-container">
                 {/* Logo */}
                 <Link to="/" className="nav-logo">
-                    <div className="logo-icon-wrapper">
-                        <Sparkles className="logo-icon" size={24} />
-                        <div className="logo-glow"></div>
-                    </div>
-                    <span className="logo-text">
-                        FinSight <span className="logo-ai">AI</span>
-                    </span>
+                    <span className="nav-logo-mark">C</span>
+                    <span className="logo-text">Cognifin</span>
                 </Link>
 
                 {/* Desktop Navigation Links */}

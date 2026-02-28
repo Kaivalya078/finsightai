@@ -6,8 +6,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 
-const STORAGE_KEY = 'finsight_conversations';
-const ACTIVE_KEY = 'finsight_activeConversation';
+const STORAGE_KEY = 'cognifin_conversations';
+const ACTIVE_KEY = 'cognifin_activeConversation';
 
 function generateId() {
     return 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -31,7 +31,8 @@ function saveToStorage(conversations) {
 }
 
 function loadActiveId() {
-    return localStorage.getItem(ACTIVE_KEY) || null;
+    // Always start on New Analysis screen — never resume last session
+    return null;
 }
 
 function saveActiveId(id) {

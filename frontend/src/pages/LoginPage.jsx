@@ -7,8 +7,7 @@
 
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
-import { Mail, Lock, Eye, EyeOff, ArrowRight, Sparkles, ArrowLeft } from 'lucide-react';
+import { Mail, Lock, Eye, EyeOff, ArrowRight, TrendingUp, ArrowLeft } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import '../styles/auth.css';
 
@@ -55,20 +54,13 @@ export default function LoginPage() {
             </Link>
 
             {/* Login Card */}
-            <motion.div
-                className="auth-card"
-                initial={{ opacity: 0, y: 30, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                transition={{ duration: 0.6, ease: [0.4, 0, 0.2, 1] }}
-            >
+            <div className="auth-card">
                 {/* Logo */}
                 <div className="auth-logo">
                     <div className="auth-logo-icon">
-                        <Sparkles size={28} />
+                        <TrendingUp size={24} />
                     </div>
-                    <h1>
-                        FinSight <span className="auth-logo-ai">AI</span>
-                    </h1>
+                    <h1>Cognifin</h1>
                 </div>
 
                 {/* Heading */}
@@ -89,7 +81,7 @@ export default function LoginPage() {
                                 type="email"
                                 value={email}
                                 onChange={(e) => setEmail(e.target.value)}
-                                placeholder="demo@finsight.ai"
+                                placeholder="demo@cognifin.ai"
                                 required
                                 autoFocus
                                 autoComplete="email"
@@ -124,13 +116,9 @@ export default function LoginPage() {
 
                     {/* Error Message */}
                     {error && (
-                        <motion.div
-                            className="auth-error"
-                            initial={{ opacity: 0, y: -10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                        >
+                        <div className="auth-error">
                             <span>⚠</span> {error}
-                        </motion.div>
+                        </div>
                     )}
 
                     {/* Submit Button */}
@@ -154,12 +142,12 @@ export default function LoginPage() {
                 <div className="auth-hint">
                     <p>Demo Credentials</p>
                     <div className="auth-hint-creds">
-                        <code>demo@finsight.ai</code>
+                        <code>demo@cognifin.ai</code>
                         <span>/</span>
                         <code>demo123</code>
                     </div>
                 </div>
-            </motion.div>
+            </div>
         </div>
     );
 }
