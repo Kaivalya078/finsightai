@@ -9,8 +9,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Copy, Check, ChevronDown, ChevronUp } from 'lucide-react';
+import { Copy, Check, ChevronDown, ChevronUp, FileText } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import PDFViewerModal from './PDFViewerModal';
 
 const WORD_INTERVAL_MS = 22;
 
@@ -145,9 +146,27 @@ function MessageBubble({ message, isLatest }) {
                         {citations.length > 0 && (
                             <div className="chat-citations">
                                 <span className="chat-citations-label">Sources:</span>
-                                {citations.map((id) => (
-                                    <span key={id} className="chat-citation-badge">{id}</span>
-                                ))}
+                                {/* Deduplicate by document_label */}
+                                {(() => {
+                                    const seen = new Set();
+                                    return evidence
+                                        .filter(item => {
+                                            const key = item.document_label || item.chunk_id;
+                                            if (seen.has(key)) return false;
+                                            seen.add(key);
+                                            return citations.includes(item.chunk_id);
+                                        })
+                                        .map(item => (
+                                            <span key={item.chunk_id} className="chat-citation-badge">
+                                                <FileText size={11} />
+                                                {item.document_label
+                                                    ? `${item.document_label}${item.page_number > 0 ? ` · p.${item.page_number}` : ''}`
+                                                    : item.chunk_id
+                                                }
+                                            </span>
+                                        ));
+                                })()
+                                }
                             </div>
                         )}
 
@@ -184,20 +203,55 @@ function MessageBubble({ message, isLatest }) {
 
 function EvidenceChunk({ item }) {
     const [expanded, setExpanded] = useState(false);
+    const [pdfOpen, setPdfOpen] = useState(false);
+
+    // Build a human-readable label: "DocumentLabel · Page N" or fall back to chunk_id
+    const label = item.document_label
+        ? `${item.document_label}${item.page_number > 0 ? ` · Page ${item.page_number}` : ''}`
+        : item.chunk_id;
+
+    // Backend serves PDFs from /pdfs/<company>/<year>.pdf
+    const pdfUrl = item.pdf_filename
+        ? `${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/pdfs/${item.pdf_filename}`
+        : null;
+
     return (
-        <div className={`chat-evidence-item ${expanded ? 'expanded' : ''}`}>
-            <button className="chat-evidence-header" onClick={() => setExpanded(!expanded)}>
-                <span className="chat-evidence-id">{item.chunk_id}</span>
-                <span className="chat-evidence-preview">
-                    {expanded ? '' : item.snippet.slice(0, 80) + '...'}
-                </span>
-                {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-            </button>
-            {expanded && (
-                <div className="chat-evidence-body">
-                    <p>{item.snippet}</p>
-                </div>
+        <>
+            <div className={`chat-evidence-item ${expanded ? 'expanded' : ''}`}>
+                <button className="chat-evidence-header" onClick={() => setExpanded(!expanded)}>
+                    <span className="chat-evidence-id">
+                        <FileText size={12} style={{ marginRight: 4, flexShrink: 0 }} />
+                        {label}
+                    </span>
+                    <span className="chat-evidence-preview">
+                        {expanded ? '' : item.snippet.slice(0, 80) + '...'}
+                    </span>
+                    {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                </button>
+                {expanded && (
+                    <div className="chat-evidence-body">
+                        <p>{item.snippet}</p>
+                        {pdfUrl && (
+                            <button
+                                className="chat-evidence-pdf-link"
+                                onClick={() => setPdfOpen(true)}
+                            >
+                                <FileText size={12} />
+                                Open PDF{item.page_number > 0 ? ` (Page ${item.page_number})` : ''}
+                            </button>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            {pdfOpen && pdfUrl && (
+                <PDFViewerModal
+                    pdfUrl={pdfUrl}
+                    pageNumber={item.page_number || 1}
+                    chunkText={item.snippet}
+                    onClose={() => setPdfOpen(false)}
+                />
             )}
-        </div>
+        </>
     );
 }

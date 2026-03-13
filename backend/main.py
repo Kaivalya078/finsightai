@@ -30,28 +30,29 @@ from contextlib import asynccontextmanager
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from cache_utils import has_leftover_tmp, clean_cache
+from core.cache_utils import has_leftover_tmp, clean_cache
 
 # Our retrieval pipeline
-from retriever_pipeline import RetrieverPipeline
-from metadata_schema import RetrievalResult
+from core.retriever_pipeline import RetrieverPipeline
+from core.metadata_schema import RetrievalResult
 
 # Phase 2: Generation layer
-from openai_client import OpenAIClient
-from prompt_builder import build_context, build_prompt, extract_citations
+from generation.openai_client import OpenAIClient
+from generation.prompt_builder import build_context, build_prompt, extract_citations
 
 # Phase 2.5: Corpus architecture
-from corpus_manager import CorpusManager
+from core.corpus_manager import CorpusManager
 
 # Stage 6: Query orchestration (parse → plan → execute)
-from query_orchestrator import retrieve_context
-from query_understanding import parse_query
-from search_plan_builder import build_plan
+from query.query_orchestrator import retrieve_context
+from query.query_understanding import parse_query
+from query.search_plan_builder import build_plan
 
 # Stage 8B: Multi-corpus routing
-from corpus_router import CorpusRouter
+from core.corpus_router import CorpusRouter
 
 # Configuration
 from dotenv import load_dotenv
@@ -160,6 +161,9 @@ class EvidenceItem(BaseModel):
     """
     chunk_id: str = Field(description="Chunk identifier")
     snippet: str = Field(description="Text content of the chunk")
+    page_number: int = Field(default=0, description="1-based page in the source PDF (0 = unknown)")
+    document_label: str = Field(default="", description="Human-readable document label, e.g. TCS_DRHP_2024_v1")
+    pdf_filename: str = Field(default="", description="Basename of the source PDF")
 
 
 class ChatResponse(BaseModel):
@@ -171,14 +175,20 @@ class ChatResponse(BaseModel):
             "answer": "The key risk factors include...",
             "citations": ["chunk_12", "chunk_47"],
             "evidence": [
-                {"chunk_id": "chunk_12", "snippet": "..."},
-                {"chunk_id": "chunk_47", "snippet": "..."}
+                {
+                    "chunk_id": "chunk_12",
+                    "snippet": "...",
+                    "page_number": 47,
+                    "document_label": "TCS_DRHP_2024_v1",
+                    "pdf_filename": "TCS_DRHP_2024.pdf"
+                }
             ]
         }
     """
     answer: str = Field(description="The generated answer grounded in document evidence")
     citations: List[str] = Field(description="Chunk IDs cited in the answer")
     evidence: List[EvidenceItem] = Field(description="Evidence chunks used to generate the answer")
+
 
 
 # --- Stage 8B: Upload Models ---
@@ -338,6 +348,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve source PDFs at /pdfs/<filename> so the frontend "Open PDF" link works.
+# Falls back gracefully if the data directory doesn't exist.
+_PDF_DIR = os.path.join(os.path.dirname(__file__), "data")
+if os.path.isdir(_PDF_DIR):
+    app.mount("/pdfs", StaticFiles(directory=_PDF_DIR), name="pdfs")
 
 
 # =============================================================================
@@ -652,9 +668,15 @@ def chat(request: ChatRequest):
         # STEP 5: Extract citations from the answer
         citations = extract_citations(answer, chunk_ids)
 
-        # STEP 6: Build evidence list
+        # STEP 6: Build evidence list (with full source citation info)
         evidence = [
-            EvidenceItem(chunk_id=r.chunk_id, snippet=r.snippet)
+            EvidenceItem(
+                chunk_id=r.chunk_id,
+                snippet=r.snippet,
+                page_number=r.page_number,
+                document_label=r.document_label,
+                pdf_filename=r.pdf_filename,
+            )
             for r in results
         ]
 

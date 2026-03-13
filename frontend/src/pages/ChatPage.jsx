@@ -2,20 +2,80 @@
  * ChatPage
  * =========
  * Main chat interface with sidebar, header, message area, and keyboard shortcuts.
- * Uses the existing api.js askQuestion() to talk to the backend.
+ * Supports session-scoped PDF upload with a progress overlay.
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Toaster, toast } from 'react-hot-toast';
-import { askQuestion, checkHealth } from '../api';
+import { askQuestion, checkHealth, uploadPdf } from '../api';
 import useConversations from '../hooks/useConversations';
 import Sidebar from '../components/chat/Sidebar';
 import ChatHeader from '../components/chat/ChatHeader';
 import MessageList from '../components/chat/MessageList';
 import ChatInput from '../components/chat/ChatInput';
-import { Sparkles, MessageSquare, TrendingUp, BarChart2, Users, DollarSign } from 'lucide-react';
+import { Sparkles, TrendingUp, BarChart2, Users, DollarSign } from 'lucide-react';
 import '../styles/chat.css';
 import '../styles/api.css';
+
+// ── Upload progress stages (simulated while HTTP call runs) ──────
+const UPLOAD_STAGES = [
+    { label: 'Reading PDF pages',          pct: 8  },
+    { label: 'Splitting into chunks',      pct: 30 },
+    { label: 'Generating embeddings',      pct: 65 },
+    { label: 'Building vector index',      pct: 90 },
+    { label: 'Finalising session',         pct: 98 },
+];
+
+// ── Upload Progress Overlay component ────────────────────────────
+function UploadProgressOverlay({ fileName, stageIndex, pct, done, error }) {
+    return (
+        <div className="upload-overlay">
+            <div className="upload-overlay-card">
+                <div className="upload-overlay-title">
+                    {done ? '✓ Analysis ready' : 'Processing PDF'}
+                </div>
+                <div className="upload-overlay-file">{fileName}</div>
+
+                {error ? (
+                    <div className="upload-overlay-error">{error}</div>
+                ) : (
+                    <>
+                        {/* Progress bar */}
+                        <div className="upload-progress-bar-wrap">
+                            <div
+                                className="upload-progress-bar-fill"
+                                style={{ width: `${pct}%` }}
+                            />
+                        </div>
+                        <div className="upload-progress-pct">{pct}%</div>
+
+                        {/* Stage indicators */}
+                        <div className="upload-stages">
+                            {UPLOAD_STAGES.map((s, i) => (
+                                <div
+                                    key={s.label}
+                                    className={`upload-stage ${
+                                        i < stageIndex ? 'done' :
+                                        i === stageIndex ? 'active' : ''
+                                    }`}
+                                >
+                                    <span className="upload-stage-dot" />
+                                    <span className="upload-stage-label">{s.label}</span>
+                                </div>
+                            ))}
+                        </div>
+
+                        {done && (
+                            <div className="upload-overlay-done">
+                                Start asking questions about this PDF!
+                            </div>
+                        )}
+                    </>
+                )}
+            </div>
+        </div>
+    );
+}
 
 export default function ChatPage() {
     const {
@@ -34,6 +94,21 @@ export default function ChatPage() {
     const [backendDown, setBackendDown] = useState(false);
     const [bannerDismissed, setBannerDismissed] = useState(false);
 
+    // Per-conversation session state (convId → { sessionId, fileName })
+    const [sessions, setSessions] = useState({});
+
+    // Upload progress state
+    const [uploading, setUploading] = useState(false);
+    const [uploadFileName, setUploadFileName] = useState('');
+    const [uploadStage, setUploadStage] = useState(0);
+    const [uploadPct, setUploadPct] = useState(0);
+    const [uploadDone, setUploadDone] = useState(false);
+    const [uploadError, setUploadError] = useState(null);
+    const stageTimer = useRef(null);
+
+    // Active session for current chat
+    const activeSession = activeId ? sessions[activeId] : null;
+
     // --- Health Check on Mount ---
     useEffect(() => {
         checkHealth()
@@ -47,46 +122,39 @@ export default function ChatPage() {
     // --- Keyboard Shortcuts ---
     useEffect(() => {
         const handleKeyboard = (e) => {
-            // Ctrl/Cmd + N → New Chat
             if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
                 e.preventDefault();
                 handleNewChat();
                 toast('New chat created', { icon: '💬', duration: 1500 });
             }
-
-            // Ctrl/Cmd + B → Toggle Sidebar
             if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
                 e.preventDefault();
                 setSidebarCollapsed((prev) => !prev);
             }
-
-            // Ctrl/Cmd + Backspace → Delete current chat
             if ((e.ctrlKey || e.metaKey) && e.key === 'Backspace' && activeId) {
                 e.preventDefault();
                 deleteConversation(activeId);
                 toast('Chat deleted', { icon: '🗑️', duration: 1500 });
             }
         };
-
         window.addEventListener('keydown', handleKeyboard);
         return () => window.removeEventListener('keydown', handleKeyboard);
     }, [activeId, deleteConversation]);
 
+    // --- Send Message ---
     const handleSend = useCallback(
         async (question) => {
-            // Create conversation if none active
             let convId = activeId;
-            if (!convId) {
-                convId = createConversation();
-            }
+            if (!convId) convId = createConversation();
 
-            // Add user message
             addMessage(convId, 'user', question);
-
-            // Call backend (same pattern as original App.jsx)
             setIsLoading(true);
+
+            // Pass session_id if this chat has one
+            const sessionId = sessions[convId]?.sessionId || null;
+
             try {
-                const data = await askQuestion(question);
+                const data = await askQuestion(question, sessionId);
                 addMessage(convId, 'assistant', data.answer, {
                     citations: data.citations || [],
                     evidence: data.evidence || [],
@@ -99,16 +167,90 @@ export default function ChatPage() {
                 setIsLoading(false);
             }
         },
+        [activeId, createConversation, addMessage, sessions]
+    );
+
+    // --- Upload PDF ---
+    const handleUpload = useCallback(
+        async (file, companyName, year) => {
+            // Make sure we have a conversation to attach the session to
+            let convId = activeId;
+            if (!convId) convId = createConversation();
+
+            // Start progress overlay
+            setUploadFileName(file.name);
+            setUploadStage(0);
+            setUploadPct(UPLOAD_STAGES[0].pct);
+            setUploadDone(false);
+            setUploadError(null);
+            setUploading(true);
+
+            // Simulate stage progression while HTTP call runs
+            let stageIdx = 0;
+            const advanceStage = () => {
+                stageIdx += 1;
+                if (stageIdx < UPLOAD_STAGES.length) {
+                    setUploadStage(stageIdx);
+                    setUploadPct(UPLOAD_STAGES[stageIdx].pct);
+                    // Each stage takes progressively longer (back-loading for embeddings)
+                    const delays = [3000, 6000, 10000, 5000];
+                    stageTimer.current = setTimeout(advanceStage, delays[stageIdx - 1] ?? 4000);
+                }
+            };
+            stageTimer.current = setTimeout(advanceStage, 2500);
+
+            try {
+                const result = await uploadPdf(file, companyName, year);
+                clearTimeout(stageTimer.current);
+
+                // Lock progress at 100% and show done
+                setUploadStage(UPLOAD_STAGES.length);
+                setUploadPct(100);
+                setUploadDone(true);
+
+                // Store session for this conversation only
+                setSessions(prev => ({
+                    ...prev,
+                    [convId]: { sessionId: result.session_id, fileName: file.name },
+                }));
+
+                // Add a system message confirming the upload
+                addMessage(
+                    convId,
+                    'assistant',
+                    `✅ **${file.name}** has been processed — ${result.chunks} chunks indexed.\n\nYou can now ask questions about this document. It's only available in this chat.`,
+                    {}
+                );
+
+                // Auto-close overlay after 2s
+                setTimeout(() => setUploading(false), 2000);
+
+            } catch (err) {
+                clearTimeout(stageTimer.current);
+                setUploadError(err.message || 'Upload failed. Please try again.');
+                setTimeout(() => setUploading(false), 4000);
+                toast.error('Upload failed: ' + (err.message || 'Unknown error'), { duration: 4000 });
+            }
+        },
         [activeId, createConversation, addMessage]
     );
 
+    const handleClearUpload = () => {
+        if (!activeId) return;
+        setSessions(prev => {
+            const next = { ...prev };
+            delete next[activeId];
+            return next;
+        });
+        toast('PDF session cleared — back to global corpus', { icon: '🗂️', duration: 2000 });
+    };
+
     const handleNewChat = () => {
-        selectConversation(null);   // just show the welcome screen — no conversation created yet
+        selectConversation(null);
     };
 
     return (
         <div className="chat-page">
-            {/* Toast Notifications */}
             <Toaster
                 position="top-center"
                 toastOptions={{
@@ -140,9 +282,19 @@ export default function ChatPage() {
                 </div>
             )}
 
+            {/* Upload Progress Overlay */}
+            {uploading && (
+                <UploadProgressOverlay
+                    fileName={uploadFileName}
+                    stageIndex={uploadStage}
+                    pct={uploadPct}
+                    done={uploadDone}
+                    error={uploadError}
+                />
+            )}
+
             {/* Sidebar + Main row */}
             <div className="chat-body">
-                {/* Sidebar */}
                 <Sidebar
                     conversations={conversations}
                     activeId={activeId}
@@ -154,7 +306,6 @@ export default function ChatPage() {
                     onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
                 />
 
-                {/* Main Chat Area */}
                 <main className={`chat-main ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
                     {activeConversation && activeConversation.messages.length > 0 ? (
                         <>
@@ -166,10 +317,15 @@ export default function ChatPage() {
                                 messages={activeConversation.messages}
                                 isLoading={isLoading}
                             />
-                            <ChatInput onSend={handleSend} isLoading={isLoading} />
+                            <ChatInput
+                                onSend={handleSend}
+                                onUpload={handleUpload}
+                                isLoading={isLoading}
+                                uploadedFile={activeSession?.fileName || null}
+                                onClearUpload={handleClearUpload}
+                            />
                         </>
                     ) : (
-                        /* Empty State / Welcome */
                         <div className="chat-welcome">
                             <div className="chat-welcome-content">
                                 <div className="chat-welcome-icon">
@@ -199,14 +355,19 @@ export default function ChatPage() {
                                     </div>
                                 </div>
 
-                                {/* Keyboard Shortcuts Hint */}
                                 <div className="chat-shortcuts">
                                     <span>⌨️ Shortcuts:</span>
                                     <kbd>Ctrl+N</kbd> New Chat
                                     <kbd>Ctrl+B</kbd> Toggle Sidebar
                                 </div>
                             </div>
-                            <ChatInput onSend={handleSend} isLoading={isLoading} />
+                            <ChatInput
+                                onSend={handleSend}
+                                onUpload={handleUpload}
+                                isLoading={isLoading}
+                                uploadedFile={activeSession?.fileName || null}
+                                onClearUpload={handleClearUpload}
+                            />
                         </div>
                     )}
                 </main>
