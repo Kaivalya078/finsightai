@@ -51,14 +51,37 @@ load_dotenv()
 
 NORMALIZATION_VERSION = "1"       # bump when normalize_text() logic changes
 METADATA_SCHEMA_VERSION = "1"     # bump when ChunkMetadata fields change
-CACHE_FORMAT_VERSION = 1          # bump on incompatible cache structure changes
-CODE_VERSION = "1.1.0-safety"     # for debugging — informational only
+CACHE_FORMAT_VERSION = 2          # Phase 1: dimension 384→768, chunk 500→1000
+CODE_VERSION = "2.0.0-retrieval"  # Phase 1: Core Retrieval Fixes
 EMBEDDING_BATCH_SIZE = 32         # fixed across all paths for float stability
 
 # Stage 3: search_scoped() tuning constants
 _SCOPED_DENSITY_MULTIPLIER: int = 4
 _SCOPED_INITIAL_MULTIPLIER: int = 3
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# CROSS-ENVIRONMENT PICKLE LOADER
+# =============================================================================
+
+# Module paths where the Chunk class may have been pickled from (e.g. Colab)
+_CHUNK_MODULE_ALIASES = {"__main__", "retriever_pipeline"}
+
+class _ChunkUnpickler(pickle.Unpickler):
+    """
+    Custom unpickler that remaps Chunk class references from alternate
+    module paths to the current module. Handles pickles created on Colab
+    (where Chunk is in __main__) or with flat imports (retriever_pipeline).
+    """
+    def find_class(self, module: str, name: str):
+        if name == "Chunk" and module in _CHUNK_MODULE_ALIASES:
+            return Chunk
+        return super().find_class(module, name)
+
+def _cross_env_unpickle(f):
+    """Load a pickle file with cross-environment Chunk class remapping."""
+    return _ChunkUnpickler(f).load()
 
 
 # =============================================================================
@@ -519,7 +542,7 @@ class RetrieverPipeline:
         logger.info("Prepared %d text chunks", len(texts))
         return texts, page_numbers
     
-    def embed_texts(self, texts: List[str]) -> np.ndarray:
+    def embed_texts(self, texts: List[str], instruction: str = None) -> np.ndarray:
         """
         Embed raw text strings into normalized vectors.
         
@@ -528,16 +551,26 @@ class RetrieverPipeline:
         
         Args:
             texts: List of text strings to embed
+            instruction: Optional instruction prefix for asymmetric retrieval.
+                        When provided, each text is encoded as "{instruction} {text}".
+                        Used by BGE-family models for query encoding.
+                        Document encoding should NOT use an instruction.
             
         Returns:
             Normalized numpy array of shape (len(texts), embedding_dim)
         """
         logger.info("Embedding %d texts...", len(texts))
         
+        # Apply instruction prefix if provided (asymmetric retrieval)
+        encode_texts = texts
+        if instruction:
+            encode_texts = [f"{instruction} {t}" for t in texts]
+            logger.debug("Applied instruction prefix: '%s'", instruction[:50])
+        
         # batch_size is fixed across all ingestion paths
         # to guarantee identical float results regardless of method
         embeddings = self.model.encode(
-            texts,
+            encode_texts,
             batch_size=EMBEDDING_BATCH_SIZE,
             show_progress_bar=False,
             convert_to_numpy=True,
@@ -548,6 +581,23 @@ class RetrieverPipeline:
         
         logger.info("Embeddings shape: %s", embeddings.shape)
         return embeddings
+    
+    def embed_query(self, query: str) -> np.ndarray:
+        """
+        Embed a single query with instruction prefix for asymmetric retrieval.
+        
+        BGE-family models benefit from an instruction prefix on query text
+        that differentiates query encoding from document encoding.
+        The instruction is read from the QUERY_INSTRUCTION env var.
+        
+        Args:
+            query: The user's query string
+            
+        Returns:
+            Normalized numpy array of shape (1, embedding_dim)
+        """
+        instruction = os.getenv("QUERY_INSTRUCTION", "")
+        return self.embed_texts([query], instruction=instruction if instruction else None)
     
     def append_vectors(
         self,
@@ -755,9 +805,11 @@ class RetrieverPipeline:
             # Load FAISS index
             self.index = faiss.read_index(index_path)
             
-            # Load chunks
+            # Load chunks (with cross-environment unpickler)
+            # chunks.pkl may have been pickled on Colab where Chunk lived in
+            # __main__ or retriever_pipeline. Remap to current module path.
             with open(chunks_path, "rb") as f:
-                self.chunks = pickle.load(f)
+                self.chunks = _cross_env_unpickle(f)
             
             # Load manifest for validation
             with open(manifest_path, "r") as f:
@@ -829,6 +881,7 @@ class RetrieverPipeline:
             "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", 50)),
             "normalization_version": NORMALIZATION_VERSION,
             "metadata_schema_version": METADATA_SCHEMA_VERSION,
+            "query_instruction": os.getenv("QUERY_INSTRUCTION", ""),
         }
         config_str = json.dumps(config, sort_keys=True)
         return hashlib.sha256(config_str.encode()).hexdigest()

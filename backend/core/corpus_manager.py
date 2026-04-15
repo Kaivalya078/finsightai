@@ -33,6 +33,7 @@ import numpy as np
 from .retriever_pipeline import RetrieverPipeline
 from .metadata_schema import RetrievalResult
 from .cache_utils import atomic_write_bytes, atomic_write_json
+from .retrieval_logger import log_retrieval_event, RetrievalTimer
 
 from .metadata_schema import (
     ChunkMetadata,
@@ -270,7 +271,9 @@ class CorpusManager:
             )
             return []
 
-        candidate_k = scope.top_k * 3
+        # Phase 2: Use RETRIEVAL_K for expanded candidate pool (reranker needs more candidates)
+        retrieval_k = int(os.getenv("RETRIEVAL_K", str(scope.top_k * 3)))
+        candidate_k = retrieval_k
 
         raw = self.retriever.search_scoped(
             query_vector,
@@ -282,7 +285,9 @@ class CorpusManager:
         results: List[RetrievalResult] = []
 
         for distance, vector_id in raw:
-            if len(results) >= scope.top_k:
+            # Phase 2: Remove top_k cap here — let all candidates through
+            # to the reranker. Final trimming happens in refine_results().
+            if len(results) >= retrieval_k:
                 break
 
             if vector_id >= len(self.retriever.chunks):
@@ -323,6 +328,33 @@ class CorpusManager:
                 pdf_filename=pdf_filename,
             ))
 
+        # --- Phase 1: Score threshold filtering ---
+        # Remove results below the similarity threshold to prevent
+        # low-quality chunks from reaching the LLM.
+        # Future (Phase 2): Implement top-k expansion before filtering —
+        # retrieve top_k × N candidates from FAISS, apply threshold,
+        # then trim to top_k. This prevents threshold filtering from
+        # returning fewer results than expected.
+        threshold = float(os.getenv("SIMILARITY_THRESHOLD", "0.30"))
+        pre_filter_count = len(results)
+        results = [r for r in results if r.score >= threshold]
+        filtered_count = pre_filter_count - len(results)
+
+        if filtered_count > 0:
+            logger.debug(
+                "search [%s]: filtered %d/%d results below threshold %.2f",
+                scope.label, filtered_count, pre_filter_count, threshold,
+            )
+
+        # --- Phase 1: Retrieval observability ---
+        log_retrieval_event(
+            query="",  # query text is logged at the endpoint level
+            results=results,
+            filtered_count=filtered_count,
+            threshold=threshold,
+            scope_label=scope.label,
+        )
+
         return results
     
     # =========================================================================
@@ -336,6 +368,10 @@ class CorpusManager:
     ) -> List[RetrievalResult]:
         per_subquery: List[List[RetrievalResult]] = []
 
+        # Phase 2: Use RETRIEVAL_K as merge limit to preserve candidates
+        # for the reranker. Final trimming to FINAL_K happens in refine_results().
+        merge_limit = int(os.getenv("RETRIEVAL_K", str(plan.final_top_k)))
+
         for sub_query in plan.sub_queries:
             vector  = embed_query(sub_query.rewritten_query)
             results = self.search(sub_query.scope, vector)
@@ -346,18 +382,18 @@ class CorpusManager:
             )
 
         if plan.merge_strategy == MergeStrategy.SINGLE:
-            return per_subquery[0][:plan.final_top_k]
+            return per_subquery[0][:merge_limit]
 
         elif plan.merge_strategy == MergeStrategy.INTERLEAVED:
             merged: List[RetrievalResult] = []
             round_idx = 0
-            while len(merged) < plan.final_top_k:
+            while len(merged) < merge_limit:
                 added_this_round = False
                 for results in per_subquery:
                     if round_idx < len(results):
                         merged.append(results[round_idx])
                         added_this_round = True
-                        if len(merged) >= plan.final_top_k:
+                        if len(merged) >= merge_limit:
                             break
                 if not added_this_round:
                     break
@@ -368,14 +404,14 @@ class CorpusManager:
             merged = []
             for sub_query, results in zip(plan.sub_queries, per_subquery):
                 for r in results:
-                    if len(merged) >= plan.final_top_k:
+                    if len(merged) >= merge_limit:
                         break
                     labeled = dc_replace(
                         r,
                         chunk_id=f"[{sub_query.label}]:{r.chunk_id}",
                     )
                     merged.append(labeled)
-                if len(merged) >= plan.final_top_k:
+                if len(merged) >= merge_limit:
                     break
             return merged
 
@@ -526,8 +562,54 @@ class CorpusManager:
                     print(f"⚠️  Document '{doc_id}' in ingestion order "
                           f"but missing from registry")
                     return False
-                    
-                meta = ChunkMetadata(**data["metadata"])
+
+                # --- Backward-compatible metadata loading ---
+                # Colab-generated registries may not have a 'metadata' sub-object.
+                # Reconstruct ChunkMetadata from document_id if missing.
+                if "metadata" in data:
+                    meta = ChunkMetadata(**data["metadata"])
+                else:
+                    # Parse document_id: "{company}_{doctype}_{year}_v{version}"
+                    # e.g. "ADANIENT_Annual_Report_2023_v1"
+                    parts = data["document_id"].rsplit("_v", 1)
+                    version = int(parts[1]) if len(parts) == 2 else 1
+                    # Split the prefix by known doc types
+                    prefix = parts[0]  # e.g. "ADANIENT_Annual_Report_2023"
+                    # Find year (last segment)
+                    segments = prefix.rsplit("_", 1)
+                    year = segments[1] if len(segments) == 2 else "2024"
+                    # Find company and doc_type
+                    remaining = segments[0]  # e.g. "ADANIENT_Annual_Report"
+                    # Try known doc types
+                    company = remaining
+                    doc_type = "Annual_Report"
+                    for known_type in ["Annual_Report", "DRHP", "Quarterly_Report",
+                                       "Balance_Sheet", "Profit_Loss", "Cash_Flow"]:
+                        if f"_{known_type}" in remaining:
+                            idx = remaining.index(f"_{known_type}")
+                            company = remaining[:idx]
+                            doc_type = known_type
+                            break
+
+                    meta = ChunkMetadata(
+                        vector_id=data["vector_id_start"],
+                        display_chunk_id=f"chunk_{data['vector_id_start']}",
+                        document_label=data["document_id"],
+                        company=company,
+                        document_type=doc_type,
+                        year=year,
+                        source_type="pdf",
+                        authority=100,
+                        section_hint=None,
+                        content_form="unknown",
+                        contains_numeric=False,
+                        version=version,
+                        is_active=True,
+                        temporal_scope="current",
+                        source_class="official",
+                        page_number=1,
+                    )
+
                 record = DocumentRecord(
                     document_id=data["document_id"],
                     pdf_path=data["pdf_path"],
@@ -542,7 +624,7 @@ class CorpusManager:
                     ingestion_timestamp=data.get(
                         "ingestion_timestamp", data["indexed_at"]
                     ),
-                    status=data.get("status", "active"),     # Stage 3 — backward compat
+                    status=data.get("status", "active"),
                 )
                 self.documents[doc_id] = record
             
@@ -555,16 +637,28 @@ class CorpusManager:
             
             self._total_vectors = registry_data["total_vectors"]
             
-            # Load chunk metadata from pickle
+            # Load chunk metadata from pickle (with cross-environment remapping)
+            # On Colab, ChunkMetadata may have been pickled as __main__.ChunkMetadata
+            # or metadata_schema.ChunkMetadata — remap to core.metadata_schema
+            _META_MODULE_ALIASES = {"__main__", "metadata_schema"}
+
+            class _MetadataUnpickler(pickle.Unpickler):
+                def find_class(self, module, name):
+                    if name == "ChunkMetadata" and module in _META_MODULE_ALIASES:
+                        return ChunkMetadata
+                    return super().find_class(module, name)
+
             with open(metadata_path, "rb") as f:
-                self.chunk_metadata = pickle.load(f)
+                self.chunk_metadata = _MetadataUnpickler(f).load()
             
             print(f"📂 Registry loaded: {len(self.documents)} document(s), "
                   f"{self._total_vectors} vectors")
             return True
             
         except Exception as e:
-            print(f"⚠️  Failed to load registry: {e}")
+            import traceback
+            print(f"⚠️  Failed to load registry: {type(e).__name__}: {e}")
+            traceback.print_exc()
             return False
     
     def init_lookup_index(self, save_dir: str, faiss_ntotal: int) -> None:

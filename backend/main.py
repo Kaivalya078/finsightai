@@ -38,12 +38,40 @@ from generation.prompt_builder import build_context, build_prompt, extract_citat
 from core.corpus_manager import CorpusManager
 
 # Stage 6: Query orchestration (parse → plan → execute)
-from query.query_orchestrator import retrieve_context
+from query.query_orchestrator import retrieve_context, intelligent_retrieve
 from query.query_understanding import parse_query
 from query.search_plan_builder import build_plan
 
 # Stage 8B: Multi-corpus routing
 from core.corpus_router import CorpusRouter
+
+# Phase 1: Retrieval observability
+from core.retrieval_logger import log_no_context_event
+
+# Phase 2: Reranking + refinement
+from core.reranker import init_reranker, is_reranker_ready
+from core.retrieval_pipeline_v2 import refine_results
+
+# Phase 3: Recall improvement (multi-query, hybrid search, expansion)
+from core.bm25_retriever import init_bm25, is_bm25_ready
+from query.multi_query import init_multi_query, is_multi_query_enabled
+from query.query_expander import get_synonym_count
+
+# Phase 4: Intelligent query understanding
+from query.intelligent_parser import init_intelligent_parser, is_intelligent_parsing_enabled
+from query.context_assembler import assemble_context
+from generation.intent_prompts import build_intent_prompt
+
+# Phase 5: Confidence + citation verification
+from core.confidence_scorer import compute_confidence
+from core.citation_verifier import verify_citations
+
+# Phase 6: Performance (cache + latency)
+from core.response_cache import response_cache
+from core.latency_tracker import LatencyTracker, latency_stats
+
+# Phase 7: Query logging
+from core.query_logger import log_query, get_query_stats, get_recent_logs
 
 # Configuration
 from dotenv import load_dotenv
@@ -107,6 +135,7 @@ class RetrieveResponse(BaseModel):
     query: str = Field(description="The original query")
     top_k: int = Field(description="Number of results returned")
     results: List[RetrieveResultItem] = Field(description="Retrieved chunks")
+    filtered_count: int = Field(default=0, description="Number of results filtered out below similarity threshold")
 
 
 class HealthResponse(BaseModel):
@@ -179,6 +208,9 @@ class ChatResponse(BaseModel):
     answer: str = Field(description="The generated answer grounded in document evidence")
     citations: List[str] = Field(description="Chunk IDs cited in the answer")
     evidence: List[EvidenceItem] = Field(description="Evidence chunks used to generate the answer")
+    confidence: Optional[float] = Field(default=None, description="Confidence score (0-1)")
+    confidence_label: Optional[str] = Field(default=None, description="Confidence label")
+    latency_ms: Optional[float] = Field(default=None, description="Total request latency in ms")
 
 
 
@@ -284,6 +316,30 @@ async def lifespan(app: FastAPI):
 
     # Stage 8B: Initialize corpus router with global corpus
     corpus_router = CorpusRouter(corpus_manager)
+
+    # Phase 2: Initialize cross-encoder reranker
+    if init_reranker():
+        print("🔄 Reranker loaded: " + os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base"))
+    else:
+        print("⚠️  Reranker disabled or failed to load — using FAISS-only ranking")
+
+    # Phase 3: Build BM25 sparse index from existing chunks
+    if init_bm25(pipeline.chunks):
+        print(f"🔍 BM25 index built: {len(pipeline.chunks)} documents")
+    else:
+        print("⚠️  BM25 disabled or failed — using dense search only")
+
+    # Phase 3: Initialize multi-query generator
+    if init_multi_query(llm_client):
+        print(f"📝 Multi-query enabled (synonyms: {get_synonym_count()} groups)")
+    else:
+        print("⚠️  Multi-query disabled — using single query")
+
+    # Phase 4: Initialize intelligent query parser
+    if init_intelligent_parser(llm_client):
+        print("🧠 Intelligent query parser enabled")
+    else:
+        print("⚠️  Intelligent parsing disabled — using rule-based parser")
 
     elapsed = time.time() - start_time
     print(f"\n✅ Corpus loaded in {elapsed:.2f}s "
@@ -519,6 +575,9 @@ def retrieve(request: RetrieveRequest):
     top_k = request.top_k if request.top_k is not None else int(os.getenv("TOP_K", 5))
 
     try:
+        final_k = int(os.getenv("FINAL_K", str(top_k)))
+        parsed = None
+
         if request.session_id is not None:
             # Session path: build plan manually, route through corpus_router
             entities = corpus_manager.list_available_entities()
@@ -527,17 +586,27 @@ def retrieve(request: RetrieveRequest):
             plan = build_plan(parsed, top_k)
             results = corpus_router.execute_plan(
                 plan,
-                embed_query=lambda q: pipeline.embed_texts([q]),
+                embed_query=lambda q: pipeline.embed_query(q),
                 session_id=request.session_id,
             )
         else:
             # Global-only path: use standard orchestrator
-            results = retrieve_context(
+            results, parsed = retrieve_context(
                 raw_query=request.query,
                 corpus_manager=corpus_manager,
-                embed_query=lambda q: pipeline.embed_texts([q]),
+                embed_query=lambda q: pipeline.embed_query(q),
                 default_top_k=top_k,
             )
+
+        # Phase 2: Refinement pipeline (rerank → boost → dedup → enrich)
+        results = refine_results(
+            results=results,
+            query=request.query,
+            parsed_query=parsed,
+            all_chunks=pipeline.chunks,
+            chunk_metadata=corpus_manager.chunk_metadata,
+            final_k=final_k,
+        )
 
         # Convert to response format
         result_items = [
@@ -552,7 +621,8 @@ def retrieve(request: RetrieveRequest):
         return RetrieveResponse(
             query=request.query,
             top_k=len(result_items),
-            results=result_items
+            results=result_items,
+            filtered_count=top_k - len(result_items) if len(result_items) < top_k else 0,
         )
 
     except KeyError as e:
@@ -623,43 +693,144 @@ def chat(request: ChatRequest):
     top_k = request.top_k if request.top_k is not None else int(os.getenv("TOP_K", 5))
 
     try:
+        tracker = LatencyTracker()
+        final_k = int(os.getenv("FINAL_K", str(top_k)))
+        intent = "lookup"
+        parse_method = "none"
+
+        # ── Phase 6: Cache check ──
+        with tracker.track("cache_check"):
+            cached = response_cache.get(request.question, request.session_id)
+        if cached:
+            print(f"⚡ Cache HIT: '{request.question[:50]}...'")
+            log_query(
+                query=request.question, intent=cached.get("intent", "cached"),
+                cached=True, latency_ms=tracker.get_total_ms(),
+            )
+            return ChatResponse(**cached["response"])
+
         if request.session_id is not None:
-            # Session path: build plan manually, route through corpus_router
+            # Session path: Phase 3 pipeline (unchanged)
             print(f"\n💬 Chat request (session {request.session_id[:8]}...): "
                   f"'{request.question[:60]}...'")
-            entities = corpus_manager.list_available_entities()
-            companies = entities.get("companies", [])
-            parsed = parse_query(request.question, companies)
-            plan = build_plan(parsed, top_k)
-            results = corpus_router.execute_plan(
-                plan,
-                embed_query=lambda q: pipeline.embed_texts([q]),
-                session_id=request.session_id,
-            )
+            with tracker.track("retrieval"):
+                entities = corpus_manager.list_available_entities()
+                companies = entities.get("companies", [])
+                parsed = parse_query(request.question, companies)
+                plan = build_plan(parsed, top_k)
+                results = corpus_router.execute_plan(
+                    plan,
+                    embed_query=lambda q: pipeline.embed_query(q),
+                    session_id=request.session_id,
+                )
+
+            with tracker.track("reranking"):
+                results = refine_results(
+                    results=results,
+                    query=request.question,
+                    parsed_query=parsed,
+                    all_chunks=pipeline.chunks,
+                    chunk_metadata=corpus_manager.chunk_metadata,
+                    final_k=final_k,
+                )
+
+            context, chunk_ids = build_context(results)
+
+        elif is_intelligent_parsing_enabled():
+            # Phase 4: Intelligent retrieval pipeline
+            print(f"\n🧠 Chat request (Phase 4): '{request.question[:60]}...'")
+            with tracker.track("intelligent_retrieve"):
+                step_results, iq = intelligent_retrieve(
+                    raw_query=request.question,
+                    corpus_manager=corpus_manager,
+                    embed_query=lambda q: pipeline.embed_query(q),
+                    pipeline=pipeline,
+                    default_top_k=top_k,
+                )
+
+            intent = iq.intent
+            parse_method = iq.parse_method
+            print(f"   Intent: {iq.intent} | Complexity: {iq.complexity} | "
+                  f"Strategy: {iq.retrieval_strategy} | Parse: {iq.parse_method}")
+
+            with tracker.track("context_assembly"):
+                context, chunk_ids = assemble_context(step_results, intent=iq.intent)
+
+            results = []
+            for step_r in step_results.values():
+                results.extend(step_r)
+
         else:
-            # Global-only path: use standard orchestrator
-            print(f"\n💬 Chat request: '{request.question[:60]}...'")
-            results = retrieve_context(
-                raw_query=request.question,
-                corpus_manager=corpus_manager,
-                embed_query=lambda q: pipeline.embed_texts([q]),
-                default_top_k=top_k,
+            # Phase 3 fallback: standard orchestrator
+            print(f"\n💬 Chat request (Phase 3): '{request.question[:60]}...'")
+            with tracker.track("retrieval"):
+                results, parsed = retrieve_context(
+                    raw_query=request.question,
+                    corpus_manager=corpus_manager,
+                    embed_query=lambda q: pipeline.embed_query(q),
+                    default_top_k=top_k,
+                )
+
+            with tracker.track("reranking"):
+                results = refine_results(
+                    results=results,
+                    query=request.question,
+                    parsed_query=parsed,
+                    all_chunks=pipeline.chunks,
+                    chunk_metadata=corpus_manager.chunk_metadata,
+                    final_k=final_k,
+                )
+
+            context, chunk_ids = build_context(results)
+
+        # --- No-context guard (all paths) ---
+        if not results:
+            print("⚠️  No context above threshold — returning no-context response")
+            log_no_context_event(
+                query=request.question,
+                threshold=float(os.getenv("SIMILARITY_THRESHOLD", "0.30")),
+            )
+            log_query(
+                query=request.question, intent=intent, parse_method=parse_method,
+                num_chunks=0, latency_ms=tracker.get_total_ms(),
+                latency_breakdown=tracker.get_breakdown(),
+            )
+            return ChatResponse(
+                answer=(
+                    "I could not find relevant information in the available documents "
+                    "to answer this question. Please try rephrasing your query or "
+                    "verify the document coverage."
+                ),
+                citations=[],
+                evidence=[],
             )
 
-        # STEP 2: Build context from retrieved chunks
-        context, chunk_ids = build_context(results)
+        # Phase 4: Intent-aware prompt
+        system_prompt, user_message = build_intent_prompt(
+            context=context,
+            query=request.question,
+            intent=intent,
+        )
 
-        # STEP 3: Build the prompt (system + user message)
-        system_prompt, user_message = build_prompt(context, request.question)
+        # Generate answer via OpenAI
+        print(f"🤖 Generating answer ({intent} intent) with {llm_client.model}...")
+        with tracker.track("llm_generation"):
+            answer = llm_client.generate(system_prompt, user_message)
 
-        # STEP 4: Generate answer via OpenAI
-        print(f"🤖 Generating answer with {llm_client.model}...")
-        answer = llm_client.generate(system_prompt, user_message)
-
-        # STEP 5: Extract citations from the answer
+        # Extract citations
         citations = extract_citations(answer, chunk_ids)
 
-        # STEP 6: Build evidence list (with full source citation info)
+        # ── Phase 5: Confidence scoring ──
+        with tracker.track("validation"):
+            confidence, confidence_label = compute_confidence(
+                results=results,
+                answer=answer,
+                query=request.question,
+                citations=citations,
+            )
+            citation_report = verify_citations(answer, chunk_ids, results)
+
+        # Build evidence list
         evidence = [
             EvidenceItem(
                 chunk_id=r.chunk_id,
@@ -671,13 +842,48 @@ def chat(request: ChatRequest):
             for r in results
         ]
 
-        print(f"✅ Answer generated ({len(citations)} citations)")
+        total_ms = tracker.get_total_ms()
+        breakdown = tracker.get_breakdown()
+        latency_stats.record(breakdown)
 
-        return ChatResponse(
+        top_score = max((r.score for r in results), default=0.0)
+
+        print(
+            f"✅ Answer generated ({len(citations)} citations, "
+            f"intent={intent}, confidence={confidence:.2f}, "
+            f"latency={total_ms:.0f}ms)"
+        )
+
+        response_data = ChatResponse(
             answer=answer,
             citations=citations,
-            evidence=evidence
+            evidence=evidence,
+            confidence=confidence,
+            confidence_label=confidence_label,
+            latency_ms=round(total_ms, 1),
         )
+
+        # ── Phase 6: Cache the response ──
+        response_cache.set(
+            request.question,
+            {"response": response_data.model_dump(), "intent": intent},
+            request.session_id,
+        )
+
+        # ── Phase 7: Log the query ──
+        log_query(
+            query=request.question,
+            intent=intent,
+            parse_method=parse_method,
+            num_chunks=len(results),
+            top_score=top_score,
+            confidence=confidence,
+            confidence_label=confidence_label,
+            latency_ms=total_ms,
+            latency_breakdown=breakdown,
+        )
+
+        return response_data
 
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -695,6 +901,24 @@ def chat(request: ChatRequest):
 
 
 @app.get(
+    "/diagnostics",
+    tags=["System"],
+    summary="System Diagnostics",
+    description="Performance and monitoring diagnostics (Phase 7)."
+)
+def diagnostics():
+    """
+    System diagnostics — cache stats, latency averages, query counts.
+    """
+    return {
+        "cache": response_cache.stats(),
+        "latency": latency_stats.get_averages(),
+        "queries": get_query_stats(),
+        "recent_queries": get_recent_logs(10),
+    }
+
+
+@app.get(
     "/",
     tags=["System"],
     summary="Root",
@@ -707,7 +931,8 @@ def root():
     return {
         "message": "Welcome to FinSight AI!",
         "docs": "Visit /docs for the interactive API documentation",
-        "health": "Visit /health to check service status"
+        "health": "Visit /health to check service status",
+        "diagnostics": "Visit /diagnostics for performance monitoring"
     }
 
 

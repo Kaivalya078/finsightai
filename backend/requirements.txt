@@ -1,4 +1,4 @@
-# FinSight AI - Phase 1 + Phase 2 Dependencies
+# FinSight AI - Phase 1 + Phase 2 + Phase 3 Dependencies
 # Install with: pip install -r requirements.txt
 
 # Web Framework
@@ -15,6 +15,9 @@ faiss-cpu>=1.7.4
 # LLM Generation (Phase 2)
 openai>=1.0.0
 
+# Sparse Retrieval (Phase 3: Hybrid Search)
+rank-bm25>=0.2.2
+
 # Configuration
 python-dotenv>=1.0.0
-python-multipart
+python-multipart

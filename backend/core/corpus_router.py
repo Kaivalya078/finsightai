@@ -26,6 +26,7 @@ Design:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace as dc_replace
 from typing import Callable, Dict, List, Optional
 
@@ -125,8 +126,9 @@ class CorpusRouter:
             # Merge by score (descending = higher similarity first)
             # This preserves FAISS ranking authority within each source
             merged = _merge_by_score(global_results, session_results)
-            # Trim to scope's top_k
-            merged = merged[:sub_query.scope.top_k]
+            # Phase 2: Use RETRIEVAL_K so reranker gets full candidate set
+            merge_limit = int(os.getenv("RETRIEVAL_K", str(sub_query.scope.top_k)))
+            merged = merged[:merge_limit]
 
             per_subquery.append(merged)
 
@@ -181,21 +183,25 @@ def _apply_merge_strategy(
     """
     Apply the plan's merge strategy across SubQuery result lists.
 
-    Mirrors CorpusManager.execute_plan() merge logic exactly.
+    Phase 2: Uses RETRIEVAL_K as merge limit (not final_top_k) so the
+    reranker receives the full candidate set. Final trim to FINAL_K
+    happens in refine_results().
     """
+    merge_limit = int(os.getenv("RETRIEVAL_K", str(plan.final_top_k)))
+
     if plan.merge_strategy == MergeStrategy.SINGLE:
-        return per_subquery[0][:plan.final_top_k]
+        return per_subquery[0][:merge_limit]
 
     if plan.merge_strategy == MergeStrategy.INTERLEAVED:
         merged: List[RetrievalResult] = []
         round_idx = 0
-        while len(merged) < plan.final_top_k:
+        while len(merged) < merge_limit:
             added_this_round = False
             for results in per_subquery:
                 if round_idx < len(results):
                     merged.append(results[round_idx])
                     added_this_round = True
-                    if len(merged) >= plan.final_top_k:
+                    if len(merged) >= merge_limit:
                         break
             if not added_this_round:
                 break
@@ -206,14 +212,14 @@ def _apply_merge_strategy(
         merged = []
         for sub_query, results in zip(plan.sub_queries, per_subquery):
             for r in results:
-                if len(merged) >= plan.final_top_k:
+                if len(merged) >= merge_limit:
                     break
                 labeled = dc_replace(
                     r,
                     chunk_id=f"[{sub_query.label}]:{r.chunk_id}",
                 )
                 merged.append(labeled)
-            if len(merged) >= plan.final_top_k:
+            if len(merged) >= merge_limit:
                 break
         return merged
 

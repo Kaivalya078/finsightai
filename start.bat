@@ -8,9 +8,14 @@ echo   FinSight AI - Starting Services
 echo  ============================================
 echo.
 
-REM Start Backend in a new window
+REM Activate venv
+set VIRTUAL_ENV=C:\Project\finsightai\venv
+set PATH=%VIRTUAL_ENV%\Scripts;%PATH%
+set PYTHONUNBUFFERED=1
+
+REM Start Backend in a new window  
 echo  [1/2] Starting Backend (FastAPI + Uvicorn)...
-start "FinSight AI - Backend" cmd /k "cd /d C:\Project\finsightai\backend && color 0B && echo  FinSight AI Backend && echo  ======================== && uvicorn main:app --reload"
+start "FinSight AI - Backend" cmd /k "cd /d C:\Project\finsightai\backend && set PYTHONUNBUFFERED=1 && C:\Project\finsightai\venv\Scripts\activate && color 0B && echo  FinSight AI Backend && echo  ======================== && python -u -m uvicorn main:app"
 
 REM Small delay so backend window appears first
 timeout /t 2 /nobreak > nul
@@ -23,6 +28,8 @@ echo.
 echo  Both services are starting in separate windows.
 echo  Frontend: http://localhost:5173
 echo  Backend:  http://localhost:8000
+echo.
+echo  NOTE: Backend takes 1-2 minutes to load models. Be patient!
 echo.
 echo  Opening browser in 5 seconds...
 timeout /t 5 /nobreak > nul
