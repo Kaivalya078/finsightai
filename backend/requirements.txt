@@ -18,3 +18,9 @@ openai>=1.0.0
 # Configuration
 python-dotenv>=1.0.0
 python-multipart
+
+# Auth + Database
+pymongo>=4.6.0
+bcrypt>=4.1.0
+python-jose[cryptography]>=3.3.0
+email-validator>=2.1.0

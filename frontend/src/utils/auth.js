@@ -1,68 +1,49 @@
 /**
- * Static Authentication Utility
- * ==============================
- * Hardcoded credentials for demo purposes.
- * Replace with real auth in production.
+ * Authentication Utility
+ * =======================
+ * JWT token management — replaces the old hardcoded-credentials module.
  */
 
-const STATIC_USERS = [
-    {
-        email: 'demo@cognifin.ai',
-        password: 'demo123',
-        name: 'Demo User',
-        avatar: 'DU'
-    }
-];
+const TOKEN_KEY = 'cognifin_token';
+const USER_KEY  = 'cognifin_user';
 
-const AUTH_KEY = 'cognifin_auth';
+// ── Token helpers ──────────────────────────────────────────────
 
-/**
- * Validate credentials against static users
- */
-export function validateCredentials(email, password) {
-    const user = STATIC_USERS.find(
-        (u) => u.email.toLowerCase() === email.toLowerCase() && u.password === password
-    );
-
-    if (!user) return null;
-
-    return {
-        email: user.email,
-        name: user.name,
-        avatar: user.avatar,
-    };
+export function getToken() {
+    return localStorage.getItem(TOKEN_KEY);
 }
 
-/**
- * Save auth session to localStorage
- */
-export function saveSession(user) {
-    const session = {
-        isAuthenticated: true,
-        user,
-        timestamp: new Date().toISOString(),
-    };
-    localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+export function setToken(token) {
+    localStorage.setItem(TOKEN_KEY, token);
 }
 
-/**
- * Load auth session from localStorage
- */
+export function clearToken() {
+    localStorage.removeItem(TOKEN_KEY);
+}
+
+// ── Session helpers ────────────────────────────────────────────
+
+export function saveSession(user, token) {
+    setToken(token);
+    localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
 export function loadSession() {
     try {
-        const raw = localStorage.getItem(AUTH_KEY);
+        const token = getToken();
+        if (!token) return null;
+
+        const raw = localStorage.getItem(USER_KEY);
         if (!raw) return null;
-        const session = JSON.parse(raw);
-        if (session.isAuthenticated) return session;
-        return null;
+
+        const user = JSON.parse(raw);
+        return { user, token };
     } catch {
         return null;
     }
 }
 
-/**
- * Clear auth session
- */
 export function clearSession() {
-    localStorage.removeItem(AUTH_KEY);
+    clearToken();
+    localStorage.removeItem(USER_KEY);
 }

@@ -13,16 +13,28 @@ sys.modules['metadata_schema'] = metadata_schema
 import os
 import time
 import shutil
+import logging
 import tempfile
 from uuid import uuid4
 from typing import List, Optional
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 # FastAPI imports
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
+
+# Auth + Database
+from db import users_collection, conversations_collection, ensure_indexes
+from auth import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    get_current_user,
+)
+from bson import ObjectId
 
 from core.cache_utils import has_leftover_tmp, clean_cache
 
@@ -119,6 +131,27 @@ class HealthResponse(BaseModel):
     generation_ready: bool = Field(description="Whether OpenAI API is configured")
 
 
+# --- Auth Models ---
+
+class RegisterRequest(BaseModel):
+    """Registration request."""
+    name: str = Field(..., min_length=2, description="User display name")
+    email: EmailStr = Field(..., description="User email address")
+    password: str = Field(..., min_length=6, description="Password (min 6 chars)")
+
+
+class LoginRequest(BaseModel):
+    """Login request."""
+    email: EmailStr = Field(..., description="User email address")
+    password: str = Field(..., description="Password")
+
+
+class AuthResponse(BaseModel):
+    """Response for register and login."""
+    token: str = Field(description="JWT access token")
+    user: dict = Field(description="User info (id, name, email)")
+
+
 # --- Phase 2: Chat Models ---
 
 class ChatRequest(BaseModel):
@@ -144,6 +177,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Session ID from /upload to include uploaded document in search",
     )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Existing conversation ID to append to. If omitted, a new conversation is created.",
+    )
 
 
 class EvidenceItem(BaseModel):
@@ -160,26 +197,11 @@ class EvidenceItem(BaseModel):
 class ChatResponse(BaseModel):
     """
     Response schema for the /chat endpoint.
-
-    Example:
-        {
-            "answer": "The key risk factors include...",
-            "citations": ["chunk_12", "chunk_47"],
-            "evidence": [
-                {
-                    "chunk_id": "chunk_12",
-                    "snippet": "...",
-                    "page_number": 47,
-                    "document_label": "TCS_DRHP_2024_v1",
-                    "pdf_filename": "TCS_DRHP_2024.pdf"
-                }
-            ]
-        }
     """
     answer: str = Field(description="The generated answer grounded in document evidence")
     citations: List[str] = Field(description="Chunk IDs cited in the answer")
     evidence: List[EvidenceItem] = Field(description="Evidence chunks used to generate the answer")
-
+    conversation_id: str = Field(default="", description="Conversation ID this message was saved to")
 
 
 # --- Stage 8B: Upload Models ---
@@ -284,6 +306,9 @@ async def lifespan(app: FastAPI):
 
     # Stage 8B: Initialize corpus router with global corpus
     corpus_router = CorpusRouter(corpus_manager)
+
+    # Ensure MongoDB indexes
+    ensure_indexes()
 
     elapsed = time.time() - start_time
     print(f"\n✅ Corpus loaded in {elapsed:.2f}s "
@@ -575,35 +600,17 @@ def retrieve(request: RetrieveRequest):
     summary="RAG Chat",
     description="Ask a question and get an AI-generated answer grounded in the document."
 )
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
-    Phase 2: RAG Chat endpoint.
+    Phase 2: RAG Chat endpoint — now with JWT auth and MongoDB persistence.
 
-    This is the core of FinSight AI Phase 2:
-    1. Takes a natural language question
-    2. Retrieves top-K relevant chunks (reuses Phase 1 pipeline)
-    3. Builds a grounded prompt with context + grounding rules
-    4. Sends to OpenAI GPT-4o-mini
-    5. Returns answer + citations + evidence
-
-    The model is strictly instructed to:
-    - ONLY answer from the provided context
-    - Refuse if information is not present
-    - Cite chunk IDs used in the answer
-
-    Args:
-        request: Contains the question and optional top_k
-
-    Returns:
-        - answer: The generated answer
-        - citations: List of chunk IDs cited
-        - evidence: Full evidence chunks used
-
-    Raises:
-        503: If no document indexed or OpenAI not configured
-        500: If generation fails
+    RAG pipeline is IDENTICAL to before.  After the answer is generated,
+    messages are persisted to MongoDB (either new conversation or appended
+    to an existing one identified by conversation_id).
     """
     global corpus_manager, llm_client, corpus_router
+
+    user_id = current_user["user_id"]
 
     # --- Guard: Check corpus ---
     if corpus_manager is None or not corpus_manager.is_indexed:
@@ -623,8 +630,8 @@ def chat(request: ChatRequest):
     top_k = request.top_k if request.top_k is not None else int(os.getenv("TOP_K", 5))
 
     try:
+        # ====== RAG PIPELINE — UNTOUCHED ======
         if request.session_id is not None:
-            # Session path: build plan manually, route through corpus_router
             print(f"\n💬 Chat request (session {request.session_id[:8]}...): "
                   f"'{request.question[:60]}...'")
             entities = corpus_manager.list_available_entities()
@@ -637,7 +644,6 @@ def chat(request: ChatRequest):
                 session_id=request.session_id,
             )
         else:
-            # Global-only path: use standard orchestrator
             print(f"\n💬 Chat request: '{request.question[:60]}...'")
             results = retrieve_context(
                 raw_query=request.question,
@@ -646,20 +652,14 @@ def chat(request: ChatRequest):
                 default_top_k=top_k,
             )
 
-        # STEP 2: Build context from retrieved chunks
         context, chunk_ids = build_context(results)
-
-        # STEP 3: Build the prompt (system + user message)
         system_prompt, user_message = build_prompt(context, request.question)
 
-        # STEP 4: Generate answer via OpenAI
         print(f"🤖 Generating answer with {llm_client.model}...")
         answer = llm_client.generate(system_prompt, user_message)
 
-        # STEP 5: Extract citations from the answer
         citations = extract_citations(answer, chunk_ids)
 
-        # STEP 6: Build evidence list (with full source citation info)
         evidence = [
             EvidenceItem(
                 chunk_id=r.chunk_id,
@@ -670,22 +670,70 @@ def chat(request: ChatRequest):
             )
             for r in results
         ]
+        # ====== END RAG PIPELINE ======
 
         print(f"✅ Answer generated ({len(citations)} citations)")
+
+        # --- Persist to MongoDB (addendum §1, §8, §9, §10, §11.3) ---
+        conversation_id_str = ""
+        try:
+            now = datetime.now(timezone.utc)
+            user_msg = {"role": "user", "content": request.question, "timestamp": now.isoformat()}
+            assistant_msg = {"role": "assistant", "content": answer, "timestamp": now.isoformat()}
+
+            if request.conversation_id:
+                # Append to existing conversation (atomic, with ownership check)
+                result = conversations_collection.update_one(
+                    {
+                        "_id": ObjectId(request.conversation_id),
+                        "user_id": ObjectId(user_id),
+                    },
+                    {
+                        "$push": {
+                            "messages": {"$each": [user_msg, assistant_msg]}
+                        },
+                        "$set": {"updated_at": now},
+                    },
+                )
+                if result.matched_count == 0:
+                    # Ownership mismatch or not found — create new instead
+                    logging.warning(
+                        "conversation_id %s not found for user %s — creating new.",
+                        request.conversation_id, user_id,
+                    )
+                    request.conversation_id = None  # fall through to create
+                else:
+                    conversation_id_str = request.conversation_id
+
+            if not request.conversation_id:
+                # Create new conversation (addendum §5: title from first question)
+                title = request.question.strip()[:40]
+                new_conv = {
+                    "user_id": ObjectId(user_id),
+                    "title": title,
+                    "messages": [user_msg, assistant_msg],
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                insert_result = conversations_collection.insert_one(new_conv)
+                conversation_id_str = str(insert_result.inserted_id)
+
+        except Exception as db_err:
+            # Addendum §11.3: DB failure must NOT block the RAG response
+            logging.error("MongoDB write failed (non-blocking): %s", db_err)
 
         return ChatResponse(
             answer=answer,
             citations=citations,
-            evidence=evidence
+            evidence=evidence,
+            conversation_id=conversation_id_str,
         )
 
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
-        # OpenAI configuration error
         raise HTTPException(status_code=503, detail=str(e))
     except RuntimeError as e:
-        # OpenAI API error (auth, rate limit, etc.)
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(
@@ -693,6 +741,178 @@ def chat(request: ChatRequest):
             detail=f"Generation error: {str(e)}"
         )
 
+
+# =============================================================================
+# AUTHENTICATION ENDPOINTS
+# =============================================================================
+
+@app.post(
+    "/register",
+    response_model=AuthResponse,
+    tags=["Auth"],
+    summary="Register",
+    description="Create a new user account.",
+)
+def register(request: RegisterRequest):
+    """Register a new user with name, email, and password."""
+    # Check for duplicate email
+    if users_collection.find_one({"email": request.email}):
+        raise HTTPException(
+            status_code=409,
+            detail="An account with this email already exists.",
+        )
+
+    now = datetime.now(timezone.utc)
+    user_doc = {
+        "name": request.name,
+        "email": request.email,
+        "password_hash": hash_password(request.password),
+        "created_at": now,
+    }
+    result = users_collection.insert_one(user_doc)
+    user_id = str(result.inserted_id)
+
+    token = create_access_token(user_id, request.email, request.name)
+
+    return AuthResponse(
+        token=token,
+        user={"id": user_id, "name": request.name, "email": request.email},
+    )
+
+
+@app.post(
+    "/login",
+    response_model=AuthResponse,
+    tags=["Auth"],
+    summary="Login",
+    description="Authenticate with email and password.",
+)
+def login(request: LoginRequest):
+    """Validate credentials and return a JWT token."""
+    user = users_collection.find_one({"email": request.email})
+    if not user or not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+        )
+
+    user_id = str(user["_id"])
+    token = create_access_token(user_id, user["email"], user["name"])
+
+    return AuthResponse(
+        token=token,
+        user={"id": user_id, "name": user["name"], "email": user["email"]},
+    )
+
+
+# =============================================================================
+# CONVERSATION ENDPOINTS
+# =============================================================================
+
+@app.get(
+    "/conversations",
+    tags=["Conversations"],
+    summary="List Conversations",
+    description="Return paginated conversations for the logged-in user.",
+)
+def list_conversations(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return user-scoped conversations (addendum §6: paginated)."""
+    user_id = current_user["user_id"]
+    skip = (page - 1) * limit
+
+    cursor = (
+        conversations_collection
+        .find({"user_id": ObjectId(user_id)})
+        .sort("updated_at", -1)
+        .skip(skip)
+        .limit(limit)
+    )
+
+    conversations = []
+    for doc in cursor:
+        conversations.append({
+            "id": str(doc["_id"]),
+            "title": doc.get("title", "New Chat"),
+            "created_at": doc.get("created_at", ""),
+            "updated_at": doc.get("updated_at", ""),
+            "message_count": len(doc.get("messages", [])),
+        })
+
+    total = conversations_collection.count_documents({"user_id": ObjectId(user_id)})
+
+    return {
+        "conversations": conversations,
+        "page": page,
+        "limit": limit,
+        "total": total,
+    }
+
+
+@app.get(
+    "/conversations/{conversation_id}",
+    tags=["Conversations"],
+    summary="Get Conversation",
+    description="Return a single conversation with all messages.",
+)
+def get_conversation(
+    conversation_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Fetch a conversation by ID (ownership enforced — addendum §9)."""
+    user_id = current_user["user_id"]
+    try:
+        doc = conversations_collection.find_one({
+            "_id": ObjectId(conversation_id),
+            "user_id": ObjectId(user_id),
+        })
+    except Exception:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    if not doc:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    return {
+        "id": str(doc["_id"]),
+        "title": doc.get("title", "New Chat"),
+        "messages": doc.get("messages", []),
+        "created_at": doc.get("created_at", ""),
+        "updated_at": doc.get("updated_at", ""),
+    }
+
+
+@app.delete(
+    "/conversations/{conversation_id}",
+    tags=["Conversations"],
+    summary="Delete Conversation",
+    description="Delete a conversation owned by the current user.",
+)
+def delete_conversation(
+    conversation_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a conversation (ownership enforced — addendum §9)."""
+    user_id = current_user["user_id"]
+    try:
+        result = conversations_collection.delete_one({
+            "_id": ObjectId(conversation_id),
+            "user_id": ObjectId(user_id),
+        })
+    except Exception:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Conversation not found or not owned by you.")
+
+    return {"deleted": True}
+
+
+# =============================================================================
+# ROOT
+# =============================================================================
 
 @app.get(
     "/",

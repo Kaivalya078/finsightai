@@ -9,6 +9,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { AuthProvider } from './context/AuthContext';
 import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
+import RegisterPage from './pages/RegisterPage';
 import ChatPage from './pages/ChatPage';
 import ProtectedRoute from './components/shared/ProtectedRoute';
 import "./App.css";
@@ -27,6 +28,11 @@ function AnimatedRoutes() {
         <Route path="/login" element={
           <PageTransition>
             <LoginPage />
+          </PageTransition>
+        } />
+        <Route path="/register" element={
+          <PageTransition>
+            <RegisterPage />
           </PageTransition>
         } />
         <Route path="/chat" element={
