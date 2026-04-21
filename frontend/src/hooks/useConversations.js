@@ -1,131 +1,148 @@
 /**
  * useConversations Hook
  * ======================
- * Manages conversation history with localStorage persistence.
+ * Manages conversation history via the backend API (MongoDB).
+ * Replaces the old localStorage-based persistence.
  */
 
 import { useState, useEffect, useCallback } from 'react';
-
-const STORAGE_KEY = 'cognifin_conversations';
-const ACTIVE_KEY = 'cognifin_activeConversation';
-
-function generateId() {
-    return 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-}
-
-function generateTitle(question) {
-    return question.length > 40 ? question.slice(0, 40) + '...' : question;
-}
-
-function loadFromStorage() {
-    try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        return raw ? JSON.parse(raw) : [];
-    } catch {
-        return [];
-    }
-}
-
-function saveToStorage(conversations) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
-}
-
-function loadActiveId() {
-    // Always start on New Analysis screen — never resume last session
-    return null;
-}
-
-function saveActiveId(id) {
-    if (id) localStorage.setItem(ACTIVE_KEY, id);
-    else localStorage.removeItem(ACTIVE_KEY);
-}
+import { getConversations, getConversation, deleteConversationApi } from '../api';
 
 export default function useConversations() {
     const [conversations, setConversations] = useState([]);
     const [activeId, setActiveId] = useState(null);
+    const [activeConversation, setActiveConversation] = useState(null);
+    const [isLoadingConversations, setIsLoadingConversations] = useState(false);
 
-    // Load on mount
-    useEffect(() => {
-        const loaded = loadFromStorage();
-        setConversations(loaded);
-        const savedActive = loadActiveId();
-        if (savedActive && loaded.find((c) => c.id === savedActive)) {
-            setActiveId(savedActive);
+    // ── Load conversation list from backend on mount ──────────
+    const refreshConversations = useCallback(async () => {
+        setIsLoadingConversations(true);
+        try {
+            const data = await getConversations(1, 50);
+            setConversations(data.conversations || []);
+        } catch (err) {
+            console.error('Failed to load conversations:', err);
+        } finally {
+            setIsLoadingConversations(false);
         }
     }, []);
 
-    // Persist conversations
     useEffect(() => {
-        if (conversations.length > 0) {
-            saveToStorage(conversations);
+        refreshConversations();
+    }, [refreshConversations]);
+
+    // ── Select a conversation (fetches full messages) ─────────
+    const selectConversation = useCallback(async (id) => {
+        setActiveId(id);
+        if (!id) {
+            setActiveConversation(null);
+            return;
         }
-    }, [conversations]);
+        try {
+            const full = await getConversation(id);
+            setActiveConversation({
+                id: full.id,
+                title: full.title,
+                messages: (full.messages || []).map((m, i) => ({
+                    id: `msg_${i}`,
+                    role: m.role,
+                    content: m.content,
+                    metadata: m.metadata || {},
+                    timestamp: m.timestamp || '',
+                })),
+                createdAt: full.created_at,
+                updatedAt: full.updated_at,
+            });
+        } catch (err) {
+            console.error('Failed to load conversation:', err);
+            setActiveConversation(null);
+        }
+    }, []);
 
-    // Persist active id
-    useEffect(() => {
-        saveActiveId(activeId);
-    }, [activeId]);
-
-    // Get active conversation
-    const activeConversation = conversations.find((c) => c.id === activeId) || null;
-
-    // Create new conversation
+    // ── Start new analysis (deselect active) ─────────────────
     const createConversation = useCallback(() => {
-        const newConv = {
-            id: generateId(),
-            title: 'New Chat',
-            messages: [],
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-        };
-        setConversations((prev) => [newConv, ...prev]);
-        setActiveId(newConv.id);
-        return newConv.id;
+        // Don't create in DB yet — we'll get a conversation_id back
+        // from the first /chat call. For now, just go to welcome screen.
+        setActiveId(null);
+        setActiveConversation(null);
+        return null;
     }, []);
 
-    // Add message to active conversation
+    // ── Add message locally (after /chat returns) ────────────
     const addMessage = useCallback((convId, role, content, metadata = {}) => {
-        setConversations((prev) =>
-            prev.map((c) => {
-                if (c.id !== convId) return c;
-                const newMsg = {
-                    id: 'msg_' + Date.now(),
-                    role, // 'user' or 'assistant'
-                    content,
-                    metadata, // { citations, evidence }
-                    timestamp: new Date().toISOString(),
-                };
-                const updated = {
-                    ...c,
-                    messages: [...c.messages, newMsg],
+        setActiveConversation((prev) => {
+            if (!prev) {
+                // New conversation — create in-memory placeholder
+                return {
+                    id: convId || 'pending',
+                    title: role === 'user' ? (content.length > 40 ? content.slice(0, 40) + '...' : content) : 'New Chat',
+                    messages: [
+                        {
+                            id: 'msg_0',
+                            role,
+                            content,
+                            metadata,
+                            timestamp: new Date().toISOString(),
+                        },
+                    ],
+                    createdAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
                 };
-                // Update title from first user message
-                if (role === 'user' && c.messages.length === 0) {
-                    updated.title = generateTitle(content);
-                }
-                return updated;
-            })
+            }
+            return {
+                ...prev,
+                id: convId || prev.id,
+                messages: [
+                    ...prev.messages,
+                    {
+                        id: `msg_${prev.messages.length}`,
+                        role,
+                        content,
+                        metadata,
+                        timestamp: new Date().toISOString(),
+                    },
+                ],
+                updatedAt: new Date().toISOString(),
+            };
+        });
+
+        // Update activeId if we just got a real conversation_id
+        if (convId && convId !== 'pending') {
+            setActiveId(convId);
+        }
+    }, []);
+
+    // ── Update conversation_id on active conversation ────────
+    const setConversationId = useCallback((newId) => {
+        setActiveId(newId);
+        setActiveConversation((prev) =>
+            prev ? { ...prev, id: newId } : prev
         );
-    }, []);
+        // Refresh the sidebar list
+        refreshConversations();
+    }, [refreshConversations]);
 
-    // Select a conversation
-    const selectConversation = useCallback((id) => {
-        setActiveId(id);
-    }, []);
-
-    // Delete a conversation
-    const deleteConversation = useCallback((id) => {
-        setConversations((prev) => prev.filter((c) => c.id !== id));
-        if (activeId === id) {
-            setActiveId(null);
+    // ── Delete a conversation ────────────────────────────────
+    const deleteConversation = useCallback(async (id) => {
+        try {
+            await deleteConversationApi(id);
+            setConversations((prev) => prev.filter((c) => c.id !== id));
+            if (activeId === id) {
+                setActiveId(null);
+                setActiveConversation(null);
+            }
+        } catch (err) {
+            console.error('Failed to delete conversation:', err);
         }
     }, [activeId]);
 
-    // Rename a conversation
+    // ── Rename a conversation (local only) ───────────────────
     const renameConversation = useCallback((id, title) => {
         setConversations((prev) =>
             prev.map((c) => (c.id === id ? { ...c, title } : c))
+        );
+        setActiveConversation((prev) =>
+            prev && prev.id === id ? { ...prev, title } : prev
         );
     }, []);
 
@@ -133,10 +150,13 @@ export default function useConversations() {
         conversations,
         activeConversation,
         activeId,
+        isLoadingConversations,
         createConversation,
         addMessage,
+        setConversationId,
         selectConversation,
         deleteConversation,
         renameConversation,
+        refreshConversations,
     };
 }

@@ -1,36 +1,48 @@
 /**
- * Login Page
- * ===========
- * Dark premium login with glassmorphism card.
- * Now calls the real backend /login endpoint.
+ * Register Page
+ * ==============
+ * User registration with name, email, password, confirm password.
+ * Shares the same glassmorphism style as LoginPage (auth.css).
  */
 
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Mail, Lock, Eye, EyeOff, ArrowRight, TrendingUp, ArrowLeft } from 'lucide-react';
+import { User, Mail, Lock, Eye, EyeOff, ArrowRight, TrendingUp, ArrowLeft } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import '../styles/auth.css';
 
-export default function LoginPage() {
+export default function RegisterPage() {
+    const [name, setName] = useState('');
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
+    const [confirmPassword, setConfirmPassword] = useState('');
     const [showPassword, setShowPassword] = useState(false);
     const [error, setError] = useState('');
     const [isLoading, setIsLoading] = useState(false);
 
-    const { login } = useAuth();
+    const { register } = useAuth();
     const navigate = useNavigate();
 
     const handleSubmit = async (e) => {
         e.preventDefault();
         setError('');
-        setIsLoading(true);
 
+        // Client-side validation
+        if (password.length < 6) {
+            setError('Password must be at least 6 characters.');
+            return;
+        }
+        if (password !== confirmPassword) {
+            setError('Passwords do not match.');
+            return;
+        }
+
+        setIsLoading(true);
         try {
-            await login(email, password);
-            navigate('/chat');
+            await register(name, email, password);
+            navigate('/login');
         } catch (err) {
-            setError(err.message || 'Invalid email or password.');
+            setError(err.message || 'Registration failed.');
         } finally {
             setIsLoading(false);
         }
@@ -51,7 +63,7 @@ export default function LoginPage() {
                 <span>Back to Home</span>
             </Link>
 
-            {/* Login Card */}
+            {/* Register Card */}
             <div className="auth-card">
                 {/* Logo */}
                 <div className="auth-logo">
@@ -63,12 +75,31 @@ export default function LoginPage() {
 
                 {/* Heading */}
                 <div className="auth-heading">
-                    <h2>Welcome Back</h2>
-                    <p>Sign in to access your financial insights</p>
+                    <h2>Create Account</h2>
+                    <p>Get started with your financial analysis</p>
                 </div>
 
                 {/* Form */}
                 <form onSubmit={handleSubmit} className="auth-form">
+                    {/* Name Field */}
+                    <div className="auth-field">
+                        <label htmlFor="name">Name</label>
+                        <div className={`auth-input-wrapper ${name ? 'has-value' : ''}`}>
+                            <User size={18} className="auth-input-icon" />
+                            <input
+                                id="name"
+                                type="text"
+                                value={name}
+                                onChange={(e) => setName(e.target.value)}
+                                placeholder="Your full name"
+                                required
+                                autoFocus
+                                autoComplete="name"
+                                minLength={2}
+                            />
+                        </div>
+                    </div>
+
                     {/* Email Field */}
                     <div className="auth-field">
                         <label htmlFor="email">Email</label>
@@ -81,7 +112,6 @@ export default function LoginPage() {
                                 onChange={(e) => setEmail(e.target.value)}
                                 placeholder="you@example.com"
                                 required
-                                autoFocus
                                 autoComplete="email"
                             />
                         </div>
@@ -97,9 +127,10 @@ export default function LoginPage() {
                                 type={showPassword ? 'text' : 'password'}
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
-                                placeholder="Enter your password"
+                                placeholder="Min. 6 characters"
                                 required
-                                autoComplete="current-password"
+                                minLength={6}
+                                autoComplete="new-password"
                             />
                             <button
                                 type="button"
@@ -109,6 +140,23 @@ export default function LoginPage() {
                             >
                                 {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                             </button>
+                        </div>
+                    </div>
+
+                    {/* Confirm Password Field */}
+                    <div className="auth-field">
+                        <label htmlFor="confirmPassword">Confirm Password</label>
+                        <div className={`auth-input-wrapper ${confirmPassword ? 'has-value' : ''}`}>
+                            <Lock size={18} className="auth-input-icon" />
+                            <input
+                                id="confirmPassword"
+                                type={showPassword ? 'text' : 'password'}
+                                value={confirmPassword}
+                                onChange={(e) => setConfirmPassword(e.target.value)}
+                                placeholder="Re-enter password"
+                                required
+                                autoComplete="new-password"
+                            />
                         </div>
                     </div>
 
@@ -123,23 +171,23 @@ export default function LoginPage() {
                     <button
                         type="submit"
                         className="auth-submit-btn"
-                        disabled={isLoading || !email || !password}
+                        disabled={isLoading || !name || !email || !password || !confirmPassword}
                     >
                         {isLoading ? (
                             <div className="auth-spinner"></div>
                         ) : (
                             <>
-                                <span>Sign In</span>
+                                <span>Create Account</span>
                                 <ArrowRight size={18} />
                             </>
                         )}
                     </button>
                 </form>
 
-                {/* Link to Register */}
+                {/* Link to Login */}
                 <div className="auth-hint">
-                    <p>Don't have an account?</p>
-                    <Link to="/register" className="auth-link">Create one →</Link>
+                    <p>Already have an account?</p>
+                    <Link to="/login" className="auth-link">Sign in →</Link>
                 </div>
             </div>
         </div>

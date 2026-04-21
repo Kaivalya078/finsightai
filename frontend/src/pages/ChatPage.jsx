@@ -84,9 +84,11 @@ export default function ChatPage() {
         activeId,
         createConversation,
         addMessage,
+        setConversationId,
         selectConversation,
         deleteConversation,
         renameConversation,
+        refreshConversations,
     } = useConversations();
 
     const [isLoading, setIsLoading] = useState(false);
@@ -144,8 +146,11 @@ export default function ChatPage() {
     // --- Send Message ---
     const handleSend = useCallback(
         async (question) => {
-            let convId = activeId;
-            if (!convId) convId = createConversation();
+            // Use existing active conversation id (may be null for first message)
+            const convId = activeId;
+            const conversationId = activeConversation?.id && activeConversation.id !== 'pending'
+                ? activeConversation.id
+                : null;
 
             addMessage(convId, 'user', question);
             setIsLoading(true);
@@ -154,8 +159,14 @@ export default function ChatPage() {
             const sessionId = sessions[convId]?.sessionId || null;
 
             try {
-                const data = await askQuestion(question, sessionId);
-                addMessage(convId, 'assistant', data.answer, {
+                const data = await askQuestion(question, sessionId, conversationId);
+
+                // If backend created a new conversation, store its id
+                if (data.conversation_id && data.conversation_id !== conversationId) {
+                    setConversationId(data.conversation_id);
+                }
+
+                addMessage(data.conversation_id || convId, 'assistant', data.answer, {
                     citations: data.citations || [],
                     evidence: data.evidence || [],
                 });
@@ -167,7 +178,7 @@ export default function ChatPage() {
                 setIsLoading(false);
             }
         },
-        [activeId, createConversation, addMessage, sessions]
+        [activeId, activeConversation, addMessage, setConversationId, sessions]
     );
 
     // --- Upload PDF ---

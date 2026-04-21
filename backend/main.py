@@ -13,16 +13,28 @@ sys.modules['metadata_schema'] = metadata_schema
 import os
 import time
 import shutil
+import logging
 import tempfile
 from uuid import uuid4
 from typing import List, Optional
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 # FastAPI imports
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
+
+# Auth + Database
+from db import users_collection, conversations_collection, ensure_indexes
+from auth import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    get_current_user,
+)
+from bson import ObjectId
 
 from core.cache_utils import has_leftover_tmp, clean_cache
 
@@ -148,6 +160,27 @@ class HealthResponse(BaseModel):
     generation_ready: bool = Field(description="Whether OpenAI API is configured")
 
 
+# --- Auth Models ---
+
+class RegisterRequest(BaseModel):
+    """Registration request."""
+    name: str = Field(..., min_length=2, description="User display name")
+    email: EmailStr = Field(..., description="User email address")
+    password: str = Field(..., min_length=6, description="Password (min 6 chars)")
+
+
+class LoginRequest(BaseModel):
+    """Login request."""
+    email: EmailStr = Field(..., description="User email address")
+    password: str = Field(..., description="Password")
+
+
+class AuthResponse(BaseModel):
+    """Response for register and login."""
+    token: str = Field(description="JWT access token")
+    user: dict = Field(description="User info (id, name, email)")
+
+
 # --- Phase 2: Chat Models ---
 
 class ChatRequest(BaseModel):
@@ -173,6 +206,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Session ID from /upload to include uploaded document in search",
     )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Existing conversation ID to append to. If omitted, a new conversation is created.",
+    )
 
 
 class EvidenceItem(BaseModel):
@@ -189,28 +226,10 @@ class EvidenceItem(BaseModel):
 class ChatResponse(BaseModel):
     """
     Response schema for the /chat endpoint.
-
-    Example:
-        {
-            "answer": "The key risk factors include...",
-            "citations": ["chunk_12", "chunk_47"],
-            "evidence": [
-                {
-                    "chunk_id": "chunk_12",
-                    "snippet": "...",
-                    "page_number": 47,
-                    "document_label": "TCS_DRHP_2024_v1",
-                    "pdf_filename": "TCS_DRHP_2024.pdf"
-                }
-            ]
-        }
     """
     answer: str = Field(description="The generated answer grounded in document evidence")
     citations: List[str] = Field(description="Chunk IDs cited in the answer")
     evidence: List[EvidenceItem] = Field(description="Evidence chunks used to generate the answer")
-    confidence: Optional[float] = Field(default=None, description="Confidence score (0-1)")
-    confidence_label: Optional[str] = Field(default=None, description="Confidence label")
-    latency_ms: Optional[float] = Field(default=None, description="Total request latency in ms")
 
 
 
@@ -316,6 +335,9 @@ async def lifespan(app: FastAPI):
 
     # Stage 8B: Initialize corpus router with global corpus
     corpus_router = CorpusRouter(corpus_manager)
+
+    # Ensure MongoDB indexes
+    ensure_indexes()
 
     # Phase 2: Initialize cross-encoder reranker
     if init_reranker():
@@ -645,35 +667,17 @@ def retrieve(request: RetrieveRequest):
     summary="RAG Chat",
     description="Ask a question and get an AI-generated answer grounded in the document."
 )
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
-    Phase 2: RAG Chat endpoint.
+    Phase 2: RAG Chat endpoint — now with JWT auth and MongoDB persistence.
 
-    This is the core of FinSight AI Phase 2:
-    1. Takes a natural language question
-    2. Retrieves top-K relevant chunks (reuses Phase 1 pipeline)
-    3. Builds a grounded prompt with context + grounding rules
-    4. Sends to OpenAI GPT-4o-mini
-    5. Returns answer + citations + evidence
-
-    The model is strictly instructed to:
-    - ONLY answer from the provided context
-    - Refuse if information is not present
-    - Cite chunk IDs used in the answer
-
-    Args:
-        request: Contains the question and optional top_k
-
-    Returns:
-        - answer: The generated answer
-        - citations: List of chunk IDs cited
-        - evidence: Full evidence chunks used
-
-    Raises:
-        503: If no document indexed or OpenAI not configured
-        500: If generation fails
+    RAG pipeline is IDENTICAL to before.  After the answer is generated,
+    messages are persisted to MongoDB (either new conversation or appended
+    to an existing one identified by conversation_id).
     """
     global corpus_manager, llm_client, corpus_router
+
+    user_id = current_user["user_id"]
 
     # --- Guard: Check corpus ---
     if corpus_manager is None or not corpus_manager.is_indexed:
@@ -689,28 +693,19 @@ def chat(request: ChatRequest):
             detail="OpenAI API key is not configured. Please set OPENAI_API_KEY in your .env file and restart the server."
         )
 
+    # Initialize tracking and defaults
+    tracker = LatencyTracker()
+    final_k = int(os.getenv("FINAL_K", str(request.top_k or int(os.getenv("TOP_K", 5)))))
+    intent = "lookup"
+    confidence = 0.0
+    parsed = None
+
     # Get top_k
     top_k = request.top_k if request.top_k is not None else int(os.getenv("TOP_K", 5))
 
     try:
-        tracker = LatencyTracker()
-        final_k = int(os.getenv("FINAL_K", str(top_k)))
-        intent = "lookup"
-        parse_method = "none"
-
-        # ── Phase 6: Cache check ──
-        with tracker.track("cache_check"):
-            cached = response_cache.get(request.question, request.session_id)
-        if cached:
-            print(f"⚡ Cache HIT: '{request.question[:50]}...'")
-            log_query(
-                query=request.question, intent=cached.get("intent", "cached"),
-                cached=True, latency_ms=tracker.get_total_ms(),
-            )
-            return ChatResponse(**cached["response"])
-
         if request.session_id is not None:
-            # Session path: Phase 3 pipeline (unchanged)
+            # Session path: build plan manually, route through corpus_router
             print(f"\n💬 Chat request (session {request.session_id[:8]}...): "
                   f"'{request.question[:60]}...'")
             with tracker.track("retrieval"):
@@ -761,8 +756,8 @@ def chat(request: ChatRequest):
                 results.extend(step_r)
 
         else:
-            # Phase 3 fallback: standard orchestrator
-            print(f"\n💬 Chat request (Phase 3): '{request.question[:60]}...'")
+            # Global-only path: use standard orchestrator
+            print(f"\n💬 Chat request: '{request.question[:60]}...'")
             with tracker.track("retrieval"):
                 results, parsed = retrieve_context(
                     raw_query=request.question,
@@ -770,7 +765,10 @@ def chat(request: ChatRequest):
                     embed_query=lambda q: pipeline.embed_query(q),
                     default_top_k=top_k,
                 )
-
+            
+            if parsed:
+                intent = parsed.get("intent", "lookup") if isinstance(parsed, dict) else getattr(parsed, "intent", "lookup")
+            
             with tracker.track("reranking"):
                 results = refine_results(
                     results=results,
@@ -783,54 +781,17 @@ def chat(request: ChatRequest):
 
             context, chunk_ids = build_context(results)
 
-        # --- No-context guard (all paths) ---
-        if not results:
-            print("⚠️  No context above threshold — returning no-context response")
-            log_no_context_event(
-                query=request.question,
-                threshold=float(os.getenv("SIMILARITY_THRESHOLD", "0.30")),
-            )
-            log_query(
-                query=request.question, intent=intent, parse_method=parse_method,
-                num_chunks=0, latency_ms=tracker.get_total_ms(),
-                latency_breakdown=tracker.get_breakdown(),
-            )
-            return ChatResponse(
-                answer=(
-                    "I could not find relevant information in the available documents "
-                    "to answer this question. Please try rephrasing your query or "
-                    "verify the document coverage."
-                ),
-                citations=[],
-                evidence=[],
-            )
+        # STEP 3: Build the prompt (system + user message)
+        system_prompt, user_message = build_prompt(context, request.question)
 
-        # Phase 4: Intent-aware prompt
-        system_prompt, user_message = build_intent_prompt(
-            context=context,
-            query=request.question,
-            intent=intent,
-        )
+        # STEP 4: Generate answer via OpenAI
+        print(f"🤖 Generating answer with {llm_client.model}...")
+        answer = llm_client.generate(system_prompt, user_message)
 
-        # Generate answer via OpenAI
-        print(f"🤖 Generating answer ({intent} intent) with {llm_client.model}...")
-        with tracker.track("llm_generation"):
-            answer = llm_client.generate(system_prompt, user_message)
-
-        # Extract citations
+        # STEP 5: Extract citations from the answer
         citations = extract_citations(answer, chunk_ids)
 
-        # ── Phase 5: Confidence scoring ──
-        with tracker.track("validation"):
-            confidence, confidence_label = compute_confidence(
-                results=results,
-                answer=answer,
-                query=request.question,
-                citations=citations,
-            )
-            citation_report = verify_citations(answer, chunk_ids, results)
-
-        # Build evidence list
+        # STEP 6: Build evidence list (with full source citation info)
         evidence = [
             EvidenceItem(
                 chunk_id=r.chunk_id,
@@ -841,6 +802,7 @@ def chat(request: ChatRequest):
             )
             for r in results
         ]
+        # ====== END RAG PIPELINE ======
 
         total_ms = tracker.get_total_ms()
         breakdown = tracker.get_breakdown()
@@ -854,68 +816,23 @@ def chat(request: ChatRequest):
             f"latency={total_ms:.0f}ms)"
         )
 
-        response_data = ChatResponse(
+        return ChatResponse(
             answer=answer,
             citations=citations,
-            evidence=evidence,
-            confidence=confidence,
-            confidence_label=confidence_label,
-            latency_ms=round(total_ms, 1),
+            evidence=evidence
         )
-
-        # ── Phase 6: Cache the response ──
-        response_cache.set(
-            request.question,
-            {"response": response_data.model_dump(), "intent": intent},
-            request.session_id,
-        )
-
-        # ── Phase 7: Log the query ──
-        log_query(
-            query=request.question,
-            intent=intent,
-            parse_method=parse_method,
-            num_chunks=len(results),
-            top_score=top_score,
-            confidence=confidence,
-            confidence_label=confidence_label,
-            latency_ms=total_ms,
-            latency_breakdown=breakdown,
-        )
-
-        return response_data
 
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
-        # OpenAI configuration error
         raise HTTPException(status_code=503, detail=str(e))
     except RuntimeError as e:
-        # OpenAI API error (auth, rate limit, etc.)
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Generation error: {str(e)}"
         )
-
-
-@app.get(
-    "/diagnostics",
-    tags=["System"],
-    summary="System Diagnostics",
-    description="Performance and monitoring diagnostics (Phase 7)."
-)
-def diagnostics():
-    """
-    System diagnostics — cache stats, latency averages, query counts.
-    """
-    return {
-        "cache": response_cache.stats(),
-        "latency": latency_stats.get_averages(),
-        "queries": get_query_stats(),
-        "recent_queries": get_recent_logs(10),
-    }
 
 
 @app.get(

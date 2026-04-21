@@ -1,11 +1,13 @@
 /**
- * Authentication Context
- * =======================
- * Provides auth state and methods to the entire app.
+ * AuthContext
+ * ===========
+ * Provides authentication state and methods to the entire app.
+ * Uses JWT tokens from the backend (replaces old static-credential auth).
  */
 
-import { createContext, useContext, useState, useEffect } from 'react';
-import { validateCredentials, saveSession, loadSession, clearSession } from '../utils/auth';
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { loginUser as apiLogin, registerUser as apiRegister } from '../api';
+import { saveSession, loadSession, clearSession } from '../utils/auth';
 
 const AuthContext = createContext(null);
 
@@ -14,37 +16,44 @@ export function AuthProvider({ children }) {
     const [isAuthenticated, setIsAuthenticated] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
 
-    // Load session on mount
+    // Restore session from localStorage on mount
     useEffect(() => {
         const session = loadSession();
-        if (session) {
+        if (session?.user && session?.token) {
             setUser(session.user);
             setIsAuthenticated(true);
         }
         setIsLoading(false);
     }, []);
 
-    // Login
-    const login = (email, password) => {
-        const validUser = validateCredentials(email, password);
-        if (!validUser) {
-            return { success: false, error: 'Invalid email or password' };
-        }
-        setUser(validUser);
+    // Login via backend POST /login
+    const login = useCallback(async (email, password) => {
+        const data = await apiLogin(email, password);
+        // data = { token, user: { id, name, email } }
+        saveSession(data.user, data.token);
+        setUser(data.user);
         setIsAuthenticated(true);
-        saveSession(validUser);
-        return { success: true };
-    };
+        return data.user;
+    }, []);
 
-    // Logout
-    const logout = () => {
+    // Register via backend POST /register
+    const register = useCallback(async (name, email, password) => {
+        const data = await apiRegister(name, email, password);
+        // Registration returns token too, but we don't auto-login
+        return data;
+    }, []);
+
+    // Logout — clear everything
+    const logout = useCallback(() => {
+        clearSession();
         setUser(null);
         setIsAuthenticated(false);
-        clearSession();
-    };
+    }, []);
 
     return (
-        <AuthContext.Provider value={{ user, isAuthenticated, isLoading, login, logout }}>
+        <AuthContext.Provider
+            value={{ user, isAuthenticated, isLoading, login, register, logout }}
+        >
             {children}
         </AuthContext.Provider>
     );
@@ -52,8 +61,6 @@ export function AuthProvider({ children }) {
 
 export function useAuth() {
     const context = useContext(AuthContext);
-    if (!context) {
-        throw new Error('useAuth must be used within an AuthProvider');
-    }
+    if (!context) throw new Error('useAuth must be used within an AuthProvider');
     return context;
 }
