@@ -93,13 +93,25 @@ Open http://localhost:8000/docs in your browser and try:
 
 ```
 backend/
-├── data/
-│   └── sample.pdf          # Your financial PDF
-├── main.py                  # FastAPI server (endpoints)
-├── retriever_pipeline.py    # Core retrieval logic
+├── main.py                  # FastAPI server (entry point)
+├── core/                    # Core RAG engine & storage
+│   ├── retriever_pipeline.py # Embedding & FAISS logic
+│   ├── corpus_manager.py     # Document state management
+│   ├── lookup_index.py       # Precomputed inverted index
+│   └── ...
+├── query/                   # Query understanding & planning
+│   ├── query_orchestrator.py # parse → plan → execute
+│   ├── query_understanding.py
+│   └── search_plan_builder.py
+├── generation/              # LLM generation layer
+│   ├── openai_client.py
+│   └── prompt_builder.py
+├── ingestion/               # CLI tools for data loading
+│   └── ingest.py            # Manual ingestion script
+├── tests/                   # Unit & evaluation suites
+├── data/                    # Raw PDF source files
+├── index_cache/             # Persisted FAISS index & metadata
 ├── requirements.txt         # Python dependencies
-├── .env.example             # Environment template
-├── .env                     # Your configuration (git-ignored)
 └── README.md                # This file
 ```
 
