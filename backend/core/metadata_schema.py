@@ -194,6 +194,7 @@ class RetrievalResult:
         page_number:    1-based page number in the source PDF (0 = unknown)
         document_label: Human-readable document identifier, e.g. "TCS_DRHP_2024_v1"
         pdf_filename:   Basename of the source PDF file, e.g. "TCS_DRHP_2024.pdf"
+        pdf_url : url of the pdf in huggingface bucket
     """
     chunk_id: str
     score: float
@@ -201,6 +202,7 @@ class RetrievalResult:
     page_number: int = 0
     document_label: str = ""
     pdf_filename: str = ""
+    pdf_url: str = ""
 
 
 # =============================================================================

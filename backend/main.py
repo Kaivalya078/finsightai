@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, EmailStr
+from asset_manager import ensure_index_cache
 
 # Auth + Database
 from db import users_collection, conversations_collection, ensure_indexes
@@ -244,7 +245,7 @@ class EvidenceItem(BaseModel):
     snippet: str = Field(description="Text content of the chunk")
     page_number: int = Field(default=0, description="1-based page in the source PDF (0 = unknown)")
     document_label: str = Field(default="", description="Human-readable document label, e.g. TCS_DRHP_2024_v1")
-    pdf_filename: str = Field(default="", description="Basename of the source PDF")
+    pdf_url: str = Field(default="", description="Basename of the source PDF")
 
 
 class ChatResponse(BaseModel):
@@ -337,6 +338,7 @@ async def lifespan(app: FastAPI):
         clean_cache(cache_dir)
 
     # Step 1: Load FAISS index
+    ensure_index_cache()
     if not pipeline.load_index(cache_dir):
         raise RuntimeError(
             f"Failed to load FAISS index from '{cache_dir}'. "
@@ -859,7 +861,7 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
                 snippet=r.snippet,
                 page_number=r.page_number,
                 document_label=r.document_label,
-                pdf_filename=r.pdf_filename,
+                pdf_url=r.pdf_url,
             )
             for r in results
         ]

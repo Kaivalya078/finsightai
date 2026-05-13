@@ -311,14 +311,30 @@ class CorpusManager:
             # pdf_path may be a Colab path (e.g. /content/drive/MyDrive/data/ADANIPORTS/2023.pdf)
             # so we extract the last 2 segments (COMPANY/YEAR.pdf) which matches
             # the local data/ directory structure and the /pdfs/ static mount.
-            pdf_filename = ""
+            # Resolve PDF URL
+            pdf_url = ""
+
             for rec in self.documents.values():
                 if rec.vector_id_start <= vector_id < rec.vector_id_end:
+
                     parts = rec.pdf_path.replace("\\", "/").rstrip("/").split("/")
-                    if len(parts) >= 2:
-                        pdf_filename = f"{parts[-2]}/{parts[-1]}"
+
+                    asset_mode = os.getenv("ASSET_MODE", "local")
+
+                    if asset_mode == "local":
+                        if len(parts) >= 2:
+                            pdf_url = f"/pdfs/{parts[-2]}/{parts[-1]}"
+                        else:
+                            pdf_url = f"/pdfs/{parts[-1]}"
+
                     else:
-                        pdf_filename = parts[-1] if parts else ""
+                        hf_base = os.getenv("HF_PDF_BASE_URL", "").rstrip("/")
+
+                        if len(parts) >= 2:
+                            pdf_url = f"{hf_base}/{parts[-2]}/{parts[-1]}"
+                        else:
+                            pdf_url = f"{hf_base}/{parts[-1]}"
+
                     break
 
             results.append(RetrievalResult(
@@ -327,7 +343,7 @@ class CorpusManager:
                 snippet=chunk.text,
                 page_number=getattr(meta, "page_number", 0),
                 document_label=meta.document_label,
-                pdf_filename=pdf_filename,
+                pdf_url=pdf_url
             ))
 
         # --- Phase 1: Score threshold filtering ---
