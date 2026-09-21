@@ -1,13 +1,43 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- SEO Meta Tags -->
+  <title>CogniFin</title>
+  <meta name="description"
+    content="Cognifin uses advanced RAG technology to analyze Indian financial documents. Ask questions, get instant answers backed by evidence from SEBI filings, DRHPs, and annual reports." />
+  <meta name="keywords" content="Cognifin, financial analysis, SEBI, DRHP, RAG, AI, document analyzer" />
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="/cognifin-icon.png" />
+  <link rel="apple-touch-icon" href="/cognifin-icon.png" />
+
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap"
+    rel="stylesheet" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Cognifin — Financial Document Analyzer" />
+  <meta property="og:description" content="AI-powered analysis of Indian financial documents with RAG technology." />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="/cognifin-icon.png" />
+
+  <style>
+    /* Prevent FOUC */
+    html {
+      background: #0a0a0a;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+
 </html>
