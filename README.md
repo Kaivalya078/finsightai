@@ -2,8 +2,6 @@
 
 RAG-based question answering over Indian financial documents (NIFTY 50 annual reports, SEBI DRHP/RHP). Ask a natural-language question, get an LLM answer grounded in cited evidence from the source PDFs.
 
-![UI](frontend_ui.png)
-
 ## Stack
 
 - **Backend:** FastAPI, PyMuPDF, sentence-transformers, FAISS, OpenAI
