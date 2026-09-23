@@ -20,7 +20,7 @@ Author: FinSight AI Team
 Phase: 2 (Retrieval Precision Layer)
 """
 
-import os
+from config import settings
 import logging
 from typing import List, Optional
 
@@ -47,11 +47,11 @@ def init_reranker() -> bool:
     """
     global _reranker_model, _reranker_ready
 
-    if not os.getenv("RERANKER_ENABLED", "true").lower() == "true":
+    if not settings.RERANKER_ENABLED:
         logger.info("Reranker disabled (RERANKER_ENABLED != true)")
         return False
 
-    model_name = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")
+    model_name = settings.RERANKER_MODEL
 
     try:
         from sentence_transformers import CrossEncoder

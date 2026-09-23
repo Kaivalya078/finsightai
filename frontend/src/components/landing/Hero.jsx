@@ -28,7 +28,7 @@ export default function Hero() {
 
                 {/* CTA Buttons */}
                 <div className="hero-cta-group">
-                    <Link to="/login" className="cta-primary">
+                    <Link to="/chat" className="cta-primary">
                         Try for Free
                         <ArrowRight size={18} />
                     </Link>

@@ -4,7 +4,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import {
-    Plus, MessageSquare, Trash2, LogOut, TrendingUp,
+    Plus, MessageSquare, Trash2, LogOut, LogIn, TrendingUp,
     PanelLeftClose, PanelLeftOpen, Pencil, Search, X, SquarePen,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -20,7 +20,7 @@ export default function Sidebar({
     isCollapsed,
     onToggleCollapse,
 }) {
-    const { user, logout } = useAuth();
+    const { user, logout, isAuthenticated } = useAuth();
     const navigate = useNavigate();
     const [query, setQuery] = useState('');
 
@@ -152,8 +152,26 @@ export default function Sidebar({
 
             {c && <div className="sidebar-collapsed-spacer" />}
 
-            {/* User / Logout */}
-            {c ? (
+            {/* Guest (anonymous trial) / Sign in */}
+            {!isAuthenticated ? (
+                c ? (
+                    <button className="sidebar-icon-btn sidebar-logout-icon" onClick={() => navigate('/login')} title="Sign in">
+                        <LogIn size={19} />
+                    </button>
+                ) : (
+                    <div className="sidebar-user">
+                        <div className="sidebar-user-info">
+                            <div className="sidebar-user-details">
+                                <span className="sidebar-user-name">Guest</span>
+                                <span className="sidebar-user-email">Sign in to save your chats</span>
+                            </div>
+                        </div>
+                        <button className="sidebar-logout-btn" onClick={() => navigate('/login')} title="Sign in">
+                            <LogIn size={17} />
+                        </button>
+                    </div>
+                )
+            ) : c ? (
                 <button className="sidebar-icon-btn sidebar-logout-icon" onClick={handleLogout} title="Logout">
                     <LogOut size={19} />
                 </button>

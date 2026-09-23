@@ -7,7 +7,6 @@ for extracting the current user from the Authorization header.
 Author: FinSight AI Team
 """
 
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -16,20 +15,27 @@ from jose import jwt, JWTError, ExpiredSignatureError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from authlib.integrations.starlette_client import OAuth
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import settings
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me-to-a-strong-random-secret")
+JWT_SECRET = settings.JWT_SECRET
+# Anyone holding the secret can mint a token for any account, so refuse to run
+# on an empty one or the placeholder that used to be committed as the default.
+if len(JWT_SECRET) < 32 or JWT_SECRET == "change-me-to-a-strong-random-secret":
+    raise RuntimeError(
+        "JWT_SECRET is unset or weak (need 32+ chars). Generate one with: "
+        'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+    )
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
 
 # FastAPI security scheme — expects "Authorization: Bearer <token>"
 _bearer_scheme = HTTPBearer()
+_optional_bearer = HTTPBearer(auto_error=False)
 
 # ---------------------------------------------------------------------------
 # Google OAuth (Authlib)
@@ -38,8 +44,8 @@ _bearer_scheme = HTTPBearer()
 oauth = OAuth()
 oauth.register(
     name="google",
-    client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
-    client_secret=os.getenv("GOOGLE_CLIENT_SECRET", ""),
+    client_id=settings.GOOGLE_CLIENT_ID,
+    client_secret=settings.GOOGLE_CLIENT_SECRET,
     server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
     client_kwargs={"scope": "openid email profile"},
 )
@@ -59,6 +65,10 @@ def hash_password(plain_password: str) -> str:
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Check a plaintext password against a bcrypt hash."""
+    # OAuth-only accounts have no password_hash; treat as a failed login,
+    # not an AttributeError on .encode().
+    if not hashed_password:
+        return False
     return bcrypt.checkpw(
         plain_password.encode("utf-8"),
         hashed_password.encode("utf-8"),
@@ -136,3 +146,12 @@ async def get_current_user(
         "email": payload.get("email", ""),
         "name": payload.get("name", ""),
     }
+
+
+async def get_optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_optional_bearer),
+) -> Optional[dict]:
+    """Like get_current_user, but None for anonymous callers. A bad token still 401s."""
+    if credentials is None:
+        return None
+    return await get_current_user(credentials)

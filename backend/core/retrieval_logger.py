@@ -17,7 +17,7 @@ Author: FinSight AI Team
 Phase: 1 (Core Retrieval Fixes — Observability)
 """
 
-import os
+from config import settings
 import json
 import time
 import logging
@@ -38,7 +38,7 @@ def configure_retrieval_logging() -> None:
     Defaults to DEBUG so retrieval diagnostics are always available
     during Phase 1 tuning. Set LOG_LEVEL=INFO in production to reduce noise.
     """
-    level_name = os.getenv("LOG_LEVEL", "DEBUG").upper()
+    level_name = settings.LOG_LEVEL.upper()
     level = getattr(logging, level_name, logging.DEBUG)
     logger.setLevel(level)
 
@@ -89,7 +89,7 @@ def log_retrieval_event(
         "filtered_count": filtered_count,
         "threshold": threshold,
         "latency_ms": round(latency_ms, 2),
-        "embedding_model": embedding_model or os.getenv("EMBEDDING_MODEL", "unknown"),
+        "embedding_model": embedding_model or settings.EMBEDDING_MODEL,
         "results": [
             {
                 "chunk_id": r.chunk_id,

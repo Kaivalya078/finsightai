@@ -17,7 +17,7 @@ Author: FinSight AI Team
 Phase: 3 (Recall Improvement Layer)
 """
 
-import os
+from config import settings
 import re
 import logging
 import time
@@ -73,7 +73,7 @@ def init_bm25(chunks: list) -> bool:
     """
     global _bm25_index, _tokenized_corpus, _bm25_ready
 
-    if not os.getenv("BM25_ENABLED", "true").lower() == "true":
+    if not settings.BM25_ENABLED:
         logger.info("BM25 disabled (BM25_ENABLED != true)")
         return False
 

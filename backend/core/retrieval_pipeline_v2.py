@@ -17,7 +17,7 @@ Author: FinSight AI Team
 Phase: 2 (Retrieval Precision Layer)
 """
 
-import os
+from config import settings
 import logging
 from typing import List, Optional
 
@@ -63,8 +63,8 @@ def refine_results(
 
     # ── Stage 1: Cross-encoder reranking ──
     # Phase 6: Reranker optimizations for latency
-    skip_threshold = float(os.getenv("SKIP_RERANKER_THRESHOLD", "0.85"))
-    max_candidates = int(os.getenv("RERANKER_MAX_CANDIDATES", "8"))
+    skip_threshold = settings.SKIP_RERANKER_THRESHOLD
+    max_candidates = settings.RERANKER_MAX_CANDIDATES
     top_score = results[0].score if results else 0
 
     if is_reranker_ready() and top_score < skip_threshold:

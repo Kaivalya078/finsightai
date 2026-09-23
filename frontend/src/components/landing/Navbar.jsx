@@ -46,7 +46,7 @@ export default function Navbar() {
                 </div>
 
                 {/* CTA Button */}
-                <Link to="/login" className="nav-cta-btn">
+                <Link to="/chat" className="nav-cta-btn">
                     <span>Try for Free</span>
                     <div className="btn-glow"></div>
                     <svg className="btn-arrow" width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -72,7 +72,7 @@ export default function Navbar() {
                     <a href="#about" className="mobile-nav-link" onClick={toggleMobileMenu}>
                         About
                     </a>
-                    <Link to="/login" className="mobile-cta-btn" onClick={toggleMobileMenu}>
+                    <Link to="/chat" className="mobile-cta-btn" onClick={toggleMobileMenu}>
                         Try for Free →
                     </Link>
                 </div>

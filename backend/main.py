@@ -16,17 +16,22 @@ import time
 import shutil
 import logging
 import tempfile
+import threading
 from uuid import uuid4
 from typing import List, Optional
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 # FastAPI imports
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, EmailStr
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from asset_manager import ensure_index_cache
 
 # Auth + Database
@@ -35,7 +40,9 @@ from auth import (
     hash_password,
     verify_password,
     create_access_token,
+    decode_access_token,
     get_current_user,
+    get_optional_user,
 )
 from bson import ObjectId
 
@@ -92,14 +99,8 @@ from core.citation_verifier import verify_citations
 from core.response_cache import response_cache
 from core.latency_tracker import LatencyTracker, latency_stats
 
-# Phase 7: Query logging
-from core.query_logger import log_query, get_query_stats, get_recent_logs
-
-# Configuration
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+from config import settings
+from auth import JWT_SECRET
 
 
 # =============================================================================
@@ -316,7 +317,7 @@ async def lifespan(app: FastAPI):
 
     start_time = time.time()
 
-    cache_dir = os.getenv("INDEX_CACHE_DIR", "index_cache")
+    cache_dir = settings.INDEX_CACHE_DIR
 
     # Initialize the retrieval pipeline
     pipeline = RetrieverPipeline()
@@ -328,6 +329,7 @@ async def lifespan(app: FastAPI):
     corpus_manager = CorpusManager(pipeline)
 
     # --- Read-only cache load ---
+    ensure_index_cache(cache_dir)  # remote mode: download before checking for it
     if not os.path.exists(cache_dir):
         raise RuntimeError(
             f"Cache directory '{cache_dir}' does not exist. "
@@ -338,7 +340,6 @@ async def lifespan(app: FastAPI):
         clean_cache(cache_dir)
 
     # Step 1: Load FAISS index
-    ensure_index_cache()
     if not pipeline.load_index(cache_dir):
         raise RuntimeError(
             f"Failed to load FAISS index from '{cache_dir}'. "
@@ -370,7 +371,7 @@ async def lifespan(app: FastAPI):
 
     # Phase 2: Initialize cross-encoder reranker
     if init_reranker():
-        print("🔄 Reranker loaded: " + os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base"))
+        print("🔄 Reranker loaded: " + settings.RERANKER_MODEL)
     else:
         print("⚠️  Reranker disabled or failed to load — using FAISS-only ranking")
 
@@ -391,6 +392,9 @@ async def lifespan(app: FastAPI):
         print("🧠 Intelligent query parser enabled")
     else:
         print("⚠️  Intelligent parsing disabled — using rule-based parser")
+
+    if llm_client.is_configured:
+        threading.Thread(target=prewarm_showcase, daemon=True).start()
 
     elapsed = time.time() - start_time
     print(f"\n✅ Corpus loaded in {elapsed:.2f}s "
@@ -439,7 +443,7 @@ This API provides semantic search and AI-powered Q&A over Indian financial docum
 
 # Add CORS middleware (allows frontend to call this API)
 # Set ALLOWED_ORIGINS in production to restrict access
-_allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+_allowed_origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",")]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
@@ -451,8 +455,41 @@ app.add_middleware(
 # Session middleware — required by Authlib for OAuth state (CSRF protection)
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.getenv("JWT_SECRET", "change-me-to-a-strong-random-secret"),
+    secret_key=JWT_SECRET,
 )
+
+def _rate_key(request: Request) -> str:
+    """Signed-in callers are limited per account, everyone else per IP."""
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        try:
+            return "user:" + decode_access_token(auth_header[7:])["sub"]
+        except HTTPException:
+            pass
+    return "ip:" + get_remote_address(request)
+
+
+def _chat_limit(key: str) -> str:
+    if key.startswith("ip:"):
+        return f"{settings.ANON_FREE_QUESTIONS}/day"
+    return settings.RATE_LIMIT_CHAT
+
+
+# ponytail: in-memory counters, per process, reset on restart. Pass
+# storage_uri="redis://..." before running more than one worker.
+limiter = Limiter(key_func=_rate_key)
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+def _rate_limited(request: Request, exc: RateLimitExceeded):
+    if request.url.path == "/chat" and _rate_key(request).startswith("ip:"):
+        detail = (f"You've used your {settings.ANON_FREE_QUESTIONS} free questions for today. "
+                  "Sign in to keep asking.")
+    else:
+        detail = f"Too many requests ({exc.detail}). Please wait and try again."
+    return JSONResponse(status_code=429, content={"detail": detail})
+
 
 # Google OAuth router
 from routers.google_auth import router as google_auth_router
@@ -515,13 +552,16 @@ def health_check():
     summary="Upload PDF",
     description="Upload a PDF document for session-scoped retrieval.",
 )
+@limiter.limit("5/hour")
 def upload_document(
+    request: Request,
     file: UploadFile = File(..., description="PDF file to upload"),
     company_name: str = Form(..., description="Company name for the document"),
     year: Optional[str] = Form(default=None, description="Fiscal year (e.g. '2024')"),
     document_type: Optional[str] = Form(
         default=None, description="Document type (default: 'Annual_Report')"
     ),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Upload a PDF for session-scoped retrieval.
@@ -551,18 +591,34 @@ def upload_document(
     year = year or "2024"
     document_type = document_type or "Annual_Report"
 
+    # Reject non-PDFs by content, not by the client-supplied name or type
+    if file.file.read(5) != b"%PDF-":
+        raise HTTPException(status_code=415, detail="Only PDF files are accepted.")
+    file.file.seek(0)
+    max_bytes = settings.UPLOAD_MAX_MB * 1024 * 1024
+
     # Save uploaded file to a temp location
     tmp_dir = None
     try:
         tmp_dir = tempfile.mkdtemp(prefix="finsight_upload_")
-        tmp_path = os.path.join(tmp_dir, file.filename or "upload.pdf")
+        # Fixed name: file.filename is client-controlled ("../../x" escapes tmp_dir)
+        tmp_path = os.path.join(tmp_dir, "upload.pdf")
 
+        written = 0
         with open(tmp_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+            while chunk := file.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"PDF exceeds the {settings.UPLOAD_MAX_MB} MB limit.",
+                    )
+                f.write(chunk)
 
         # Create isolated pipeline + corpus (shares embedding model weights)
         session_pipeline = RetrieverPipeline()
         session_corpus = CorpusManager(session_pipeline)
+        session_corpus.public_pdfs = False  # temp file, deleted below
 
         # Ingest into session corpus (in-memory only)
         num_chunks = session_corpus.add_document(
@@ -584,6 +640,8 @@ def upload_document(
             document_type=document_type,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -606,7 +664,8 @@ def upload_document(
     summary="Semantic Retrieval",
     description="Find the most relevant chunks for a given query."
 )
-def retrieve(request: RetrieveRequest):
+@limiter.limit("30/minute")
+def retrieve(request: Request, body: RetrieveRequest):
     """
     Main retrieval endpoint.
 
@@ -637,27 +696,27 @@ def retrieve(request: RetrieveRequest):
         )
 
     # Get top_k (use request value or default from env)
-    top_k = request.top_k if request.top_k is not None else int(os.getenv("TOP_K", 5))
+    top_k = body.top_k if body.top_k is not None else settings.TOP_K
 
     try:
-        final_k = int(os.getenv("FINAL_K", str(top_k)))
+        final_k = settings.FINAL_K
         parsed = None
 
-        if request.session_id is not None:
+        if body.session_id is not None:
             # Session path: build plan manually, route through corpus_router
             entities = corpus_manager.list_available_entities()
             companies = entities.get("companies", [])
-            parsed = parse_query(request.query, companies)
+            parsed = parse_query(body.query, companies)
             plan = build_plan(parsed, top_k)
             results = corpus_router.execute_plan(
                 plan,
                 embed_query=lambda q: pipeline.embed_query(q),
-                session_id=request.session_id,
+                session_id=body.session_id,
             )
         else:
             # Global-only path: use standard orchestrator
             results, parsed = retrieve_context(
-                raw_query=request.query,
+                raw_query=body.query,
                 corpus_manager=corpus_manager,
                 embed_query=lambda q: pipeline.embed_query(q),
                 default_top_k=top_k,
@@ -666,7 +725,7 @@ def retrieve(request: RetrieveRequest):
         # Phase 2: Refinement pipeline (rerank → boost → dedup → enrich)
         results = refine_results(
             results=results,
-            query=request.query,
+            query=body.query,
             parsed_query=parsed,
             all_chunks=pipeline.chunks,
             chunk_metadata=corpus_manager.chunk_metadata,
@@ -684,7 +743,7 @@ def retrieve(request: RetrieveRequest):
         ]
 
         return RetrieveResponse(
-            query=request.query,
+            query=body.query,
             top_k=len(result_items),
             results=result_items,
             filtered_count=top_k - len(result_items) if len(result_items) < top_k else 0,
@@ -703,214 +762,169 @@ def retrieve(request: RetrieveRequest):
 # PHASE 2: CHAT ENDPOINT (RAG Generation)
 # =============================================================================
 
-@app.post(
-    "/chat",
-    response_model=ChatResponse,
-    tags=["Generation"],
-    summary="RAG Chat",
-    description="Ask a question and get an AI-generated answer grounded in the document."
-)
-def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+# The suggested questions on the chat welcome screen (frontend ChatPage.jsx).
+# Keep the two lists identical: a pinned cache hit needs the exact text.
+SHOWCASE_QUESTIONS = [
+    "Compare TCS and Infosys revenue and profit",
+    "What are the key risk factors?",
+    "Who are the promoters and their shareholding?",
+    "Summarise the financial highlights",
+]
+
+
+def prewarm_showcase() -> None:
+    """Answer the showcase questions once and pin them, so a visitor's first click is instant."""
+    for q in SHOWCASE_QUESTIONS:
+        try:
+            response_cache.set(q, answer_question(q), pin=True)
+        except Exception as e:
+            print(f"⚠️  Pre-warm failed for '{q}': {e}")
+
+
+# Query intent (rule-based or intelligent parser) → intent_prompts.py template
+_STRUCTURED_PROMPTS = {"comparison": "compare", "compare": "compare",
+                       "temporal": "trend", "trend": "trend"}
+
+
+def answer_question(question: str, session_id: Optional[str] = None,
+                    top_k: Optional[int] = None) -> dict:
     """
-    Phase 2: RAG Chat endpoint — now with JWT auth and MongoDB persistence.
+    Run the RAG pipeline, or serve it from the response cache.
 
-    RAG pipeline is IDENTICAL to before.  After the answer is generated,
-    messages are persisted to MongoDB (either new conversation or appended
-    to an existing one identified by conversation_id).
+    Returns a user-independent payload (answer, citations, evidence, metadata,
+    follow_ups). The prompt carries no per-user context, so one cached answer is
+    correct for everyone — which is why conversation_id is never part of it.
+    Raises KeyError / ValueError / RuntimeError from the pipeline.
     """
-    global corpus_manager, llm_client, corpus_router
+    cached = response_cache.get(question, session_id)
+    if cached:
+        print(f"⚡ Cache HIT for: '{question[:60]}...'")
+        return {**cached, "metadata": {**cached.get("metadata", {}), "cached": True}}
 
-    user_id = current_user["user_id"]
-
-    # --- Guard: Check corpus ---
-    if corpus_manager is None or not corpus_manager.is_indexed:
-        raise HTTPException(
-            status_code=503,
-            detail="No document indexed. Please ensure PDF_PATH is set correctly and restart the server."
-        )
-
-    # --- Guard: Check OpenAI client ---
-    if llm_client is None or not llm_client.is_configured:
-        raise HTTPException(
-            status_code=503,
-            detail="OpenAI API key is not configured. Please set OPENAI_API_KEY in your .env file and restart the server."
-        )
-
-    # Initialize tracking and defaults
     tracker = LatencyTracker()
-    final_k = int(os.getenv("FINAL_K", str(request.top_k or int(os.getenv("TOP_K", 5)))))
+    top_k = top_k if top_k is not None else settings.TOP_K
+    final_k = settings.FINAL_K
     intent = "lookup"
-    confidence = 0.0
     parsed = None
 
-    # Get top_k
-    top_k = request.top_k if request.top_k is not None else int(os.getenv("TOP_K", 5))
-
-    # --- Response cache: return instantly for repeated queries ---
-    cached = response_cache.get(request.question, request.session_id)
-    if cached:
-        print(f"⚡ Cache HIT for: '{request.question[:60]}...'")
-        cached_metadata = cached.get("metadata", {})
-        return ChatResponse(
-            answer=cached.get("answer", ""),
-            citations=cached.get("citations", []),
-            evidence=[EvidenceItem(**e) for e in cached.get("evidence", [])],
-            conversation_id=cached.get("conversation_id"),
-            metadata={**cached_metadata, "cached": True},
-            follow_ups=cached.get("follow_ups", []),
-        )
-
-    try:
-        if request.session_id is not None:
-            # Session path: build plan manually, route through corpus_router
-            print(f"\n💬 Chat request (session {request.session_id[:8]}...): "
-                  f"'{request.question[:60]}...'")
-            with tracker.track("retrieval"):
-                entities = corpus_manager.list_available_entities()
-                companies = entities.get("companies", [])
-                parsed = parse_query(request.question, companies)
-                plan = build_plan(parsed, top_k)
-                results = corpus_router.execute_plan(
-                    plan,
-                    embed_query=lambda q: pipeline.embed_query(q),
-                    session_id=request.session_id,
-                )
-
-            with tracker.track("reranking"):
-                results = refine_results(
-                    results=results,
-                    query=request.question,
-                    parsed_query=parsed,
-                    all_chunks=pipeline.chunks,
-                    chunk_metadata=corpus_manager.chunk_metadata,
-                    final_k=final_k,
-                )
-
-            context, chunk_ids = build_context(results)
-
-        elif is_intelligent_parsing_enabled():
-            # Phase 4: Intelligent retrieval pipeline
-            print(f"\n🧠 Chat request (Phase 4): '{request.question[:60]}...'")
-            with tracker.track("intelligent_retrieve"):
-                step_results, iq = intelligent_retrieve(
-                    raw_query=request.question,
-                    corpus_manager=corpus_manager,
-                    embed_query=lambda q: pipeline.embed_query(q),
-                    pipeline=pipeline,
-                    default_top_k=top_k,
-                )
-
-            intent = iq.intent
-            parse_method = iq.parse_method
-            print(f"   Intent: {iq.intent} | Complexity: {iq.complexity} | "
-                  f"Strategy: {iq.retrieval_strategy} | Parse: {iq.parse_method}")
-
-            with tracker.track("context_assembly"):
-                context, chunk_ids = assemble_context(step_results, intent=iq.intent)
-
-            results = []
-            for step_r in step_results.values():
-                results.extend(step_r)
-
-        else:
-            # Global-only path: use standard orchestrator
-            print(f"\n💬 Chat request: '{request.question[:60]}...'")
-            with tracker.track("retrieval"):
-                results, parsed = retrieve_context(
-                    raw_query=request.question,
-                    corpus_manager=corpus_manager,
-                    embed_query=lambda q: pipeline.embed_query(q),
-                    default_top_k=top_k,
-                )
-            
-            if parsed:
-                intent = parsed.get("intent", "lookup") if isinstance(parsed, dict) else getattr(parsed, "intent", "lookup")
-            
-            with tracker.track("reranking"):
-                results = refine_results(
-                    results=results,
-                    query=request.question,
-                    parsed_query=parsed,
-                    all_chunks=pipeline.chunks,
-                    chunk_metadata=corpus_manager.chunk_metadata,
-                    final_k=final_k,
-                )
-
-            context, chunk_ids = build_context(results)
-
-        # STEP 3: Build the prompt (system + user message)
-        system_prompt, user_message = build_prompt(context, request.question)
-
-        # STEP 4: Generate answer via OpenAI
-        print(f"🤖 Generating answer with {llm_client.model}...")
-        raw_answer = llm_client.generate(system_prompt, user_message)
-
-        # STEP 4b: Extract follow-up suggestions from LLM output
-        answer, follow_ups = extract_follow_ups(raw_answer)
-
-        # STEP 5: Extract citations from the answer
-        citations = extract_citations(answer, chunk_ids)
-
-        # STEP 5b: Compute confidence score
-        confidence, conf_label = compute_confidence(results, answer, request.question, citations)
-
-        # STEP 6: Build evidence list (with full source citation info)
-        evidence = [
-            EvidenceItem(
-                chunk_id=r.chunk_id,
-                snippet=r.snippet,
-                page_number=r.page_number,
-                document_label=r.document_label,
-                pdf_url=r.pdf_url,
+    if session_id is not None:
+        # Session path: build plan manually, route through corpus_router
+        print(f"\n💬 Chat request (session {session_id[:8]}...): '{question[:60]}...'")
+        with tracker.track("retrieval"):
+            entities = corpus_manager.list_available_entities()
+            companies = entities.get("companies", [])
+            parsed = parse_query(question, companies)
+            plan = build_plan(parsed, top_k)
+            results = corpus_router.execute_plan(
+                plan,
+                embed_query=lambda q: pipeline.embed_query(q),
+                session_id=session_id,
             )
-            for r in results
-        ]
-        # ====== END RAG PIPELINE ======
 
-        total_ms = tracker.get_total_ms()
-        breakdown = tracker.get_breakdown()
-        latency_stats.record(breakdown)
+        with tracker.track("reranking"):
+            results = refine_results(
+                results=results,
+                query=question,
+                parsed_query=parsed,
+                all_chunks=pipeline.chunks,
+                chunk_metadata=corpus_manager.chunk_metadata,
+                final_k=final_k,
+            )
 
-        top_score = max((r.score for r in results), default=0.0)
+        context, chunk_ids = build_context(results)
 
-        print(
-            f"✅ Answer generated ({len(citations)} citations, "
-            f"intent={intent}, confidence={confidence:.2f}, "
-            f"latency={total_ms:.0f}ms)"
-        )
+    elif is_intelligent_parsing_enabled():
+        # Phase 4: Intelligent retrieval pipeline
+        print(f"\n🧠 Chat request (Phase 4): '{question[:60]}...'")
+        with tracker.track("intelligent_retrieve"):
+            step_results, iq = intelligent_retrieve(
+                raw_query=question,
+                corpus_manager=corpus_manager,
+                embed_query=lambda q: pipeline.embed_query(q),
+                pipeline=pipeline,
+                default_top_k=top_k,
+            )
 
-        # --- Persist conversation to MongoDB ---
-        now_iso = datetime.now(timezone.utc).isoformat()
-        user_msg = {
-            "role": "user",
-            "content": request.question,
-            "metadata": {},
-            "timestamp": now_iso,
-        }
-        assistant_msg = {
-            "role": "assistant",
-            "content": answer,
-            "metadata": {
-                "citations": citations,
-                "evidence": [e.model_dump() for e in evidence],
-            },
-            "timestamp": now_iso,
-        }
+        intent = iq.intent
+        print(f"   Intent: {iq.intent} | Complexity: {iq.complexity} | "
+              f"Strategy: {iq.retrieval_strategy} | Parse: {iq.parse_method}")
 
-        conv_id = request.conversation_id
-        try:
-            if conv_id:
-                # Append to existing conversation
-                db_append_to_conversation(conv_id, user_id, user_msg, assistant_msg)
-            else:
-                # Create new conversation (title = first 60 chars of question)
-                title = request.question[:60] + ("..." if len(request.question) > 60 else "")
-                conv_id = db_create_conversation(user_id, title, user_msg, assistant_msg)
-        except Exception as persist_err:
-            # Don't fail the request if persistence fails — log and continue
-            print(f"⚠️  Conversation persistence error: {persist_err}")
+        with tracker.track("context_assembly"):
+            context, chunk_ids = assemble_context(step_results, intent=iq.intent)
 
-        pipeline_metadata = {
+        results = []
+        for step_r in step_results.values():
+            results.extend(step_r)
+
+    else:
+        # Global-only path: use standard orchestrator
+        print(f"\n💬 Chat request: '{question[:60]}...'")
+        with tracker.track("retrieval"):
+            results, parsed = retrieve_context(
+                raw_query=question,
+                corpus_manager=corpus_manager,
+                embed_query=lambda q: pipeline.embed_query(q),
+                default_top_k=top_k,
+            )
+
+        if parsed:
+            intent = parsed.get("intent", "lookup") if isinstance(parsed, dict) else getattr(parsed, "intent", "lookup")
+
+        with tracker.track("reranking"):
+            results = refine_results(
+                results=results,
+                query=question,
+                parsed_query=parsed,
+                all_chunks=pipeline.chunks,
+                chunk_metadata=corpus_manager.chunk_metadata,
+                final_k=final_k,
+            )
+
+        context, chunk_ids = build_context(results)
+
+    # Build the prompt and generate. Comparisons and trends get prompts that
+    # demand tables over entities/periods; everything else keeps the generic
+    # prompt, whose grounding rules are tuned against over-refusal.
+    prompt_intent = _STRUCTURED_PROMPTS.get(intent)
+    if prompt_intent:
+        system_prompt, user_message = build_intent_prompt(context, question, prompt_intent)
+    else:
+        system_prompt, user_message = build_prompt(context, question)
+    print(f"🤖 Generating answer with {llm_client.model}...")
+    raw_answer = llm_client.generate(system_prompt, user_message)
+
+    answer, follow_ups = extract_follow_ups(raw_answer)
+    citations = extract_citations(answer, chunk_ids)
+    confidence, conf_label = compute_confidence(results, answer, question, citations)
+    citation_check = verify_citations(answer, chunk_ids)
+
+    evidence = [
+        EvidenceItem(
+            chunk_id=r.chunk_id,
+            snippet=r.snippet,
+            page_number=r.page_number,
+            document_label=r.document_label,
+            pdf_url=r.pdf_url,
+        ).model_dump()
+        for r in results
+    ]
+
+    total_ms = tracker.get_total_ms()
+    breakdown = tracker.get_breakdown()
+    latency_stats.record(breakdown)
+    top_score = max((r.score for r in results), default=0.0)
+
+    print(
+        f"✅ Answer generated ({len(citations)} citations, "
+        f"intent={intent}, confidence={confidence:.2f}, "
+        f"latency={total_ms:.0f}ms)"
+    )
+
+    payload = {
+        "answer": answer,
+        "citations": citations,
+        "evidence": evidence,
+        "metadata": {
             "confidence": confidence,
             "confidence_label": conf_label,
             "intent": intent,
@@ -920,32 +934,61 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
             "top_score": round(top_score, 3),
             "cached": False,
             "model": llm_client.model,
-        }
+            "citation_check": citation_check,
+        },
+        "follow_ups": follow_ups,
+    }
+    response_cache.set(question, payload, session_id)
+    return payload
 
-        response_data = ChatResponse(
-            answer=answer,
-            citations=citations,
-            evidence=evidence,
-            conversation_id=conv_id,
-            metadata=pipeline_metadata,
-            follow_ups=follow_ups,
+
+def persist_exchange(user_id: str, conversation_id: Optional[str],
+                     question: str, payload: dict) -> Optional[str]:
+    """Save the Q/A pair to the user's conversation; returns its id."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    user_msg = {"role": "user", "content": question, "metadata": {}, "timestamp": now_iso}
+    assistant_msg = {
+        "role": "assistant",
+        "content": payload["answer"],
+        "metadata": {"citations": payload["citations"], "evidence": payload["evidence"]},
+        "timestamp": now_iso,
+    }
+    try:
+        if conversation_id:
+            db_append_to_conversation(conversation_id, user_id, user_msg, assistant_msg)
+        else:
+            title = question[:60] + ("..." if len(question) > 60 else "")
+            conversation_id = db_create_conversation(user_id, title, user_msg, assistant_msg)
+    except Exception as persist_err:
+        # Don't fail the request if persistence fails — log and continue
+        print(f"⚠️  Conversation persistence error: {persist_err}")
+    return conversation_id
+
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    tags=["Generation"],
+    summary="RAG Chat",
+    description="Ask a question and get an AI-generated answer grounded in the document."
+)
+@limiter.limit(_chat_limit)
+def chat(request: Request, body: ChatRequest,
+         current_user: Optional[dict] = Depends(get_optional_user)):
+    """Answer (fresh or cached), then persist to the caller's conversation."""
+    if corpus_manager is None or not corpus_manager.is_indexed:
+        raise HTTPException(
+            status_code=503,
+            detail="No document indexed. Please ensure PDF_PATH is set correctly and restart the server."
+        )
+    if llm_client is None or not llm_client.is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI API key is not configured. Please set OPENAI_API_KEY in your .env file and restart the server."
         )
 
-        # --- Cache the successful response ---
-        response_cache.set(
-            request.question,
-            {
-                "answer": answer,
-                "citations": citations,
-                "evidence": [e.model_dump() for e in evidence],
-                "metadata": pipeline_metadata,
-                "follow_ups": follow_ups,
-            },
-            request.session_id,
-        )
-
-        return response_data
-
+    try:
+        payload = answer_question(body.question, body.session_id, body.top_k)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -953,10 +996,82 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Generation error: {str(e)}"
+        raise HTTPException(status_code=500, detail=f"Generation error: {str(e)}")
+
+    # Anonymous trial answers aren't saved; there is no account to save them to.
+    conv_id = None
+    if current_user:
+        conv_id = persist_exchange(
+            current_user["user_id"], body.conversation_id, body.question, payload
         )
+    return ChatResponse(**payload, conversation_id=conv_id)
+
+
+# =============================================================================
+# AUTHENTICATION ENDPOINTS
+# =============================================================================
+
+@app.post(
+    "/register",
+    response_model=AuthResponse,
+    tags=["Auth"],
+    summary="Register",
+    description="Create a new user account.",
+)
+@limiter.limit("10/minute")
+def register(request: Request, body: RegisterRequest):
+    """Register a new user with name, email, and password."""
+    email = body.email.lower()
+
+    # Check for duplicate email
+    if users_collection.find_one({"email": email}):
+        raise HTTPException(
+            status_code=409,
+            detail="An account with this email already exists.",
+        )
+
+    now = datetime.now(timezone.utc)
+    user_doc = {
+        "name": body.name,
+        "email": email,
+        "password_hash": hash_password(body.password),
+        "created_at": now,
+    }
+    result = users_collection.insert_one(user_doc)
+    user_id = str(result.inserted_id)
+
+    token = create_access_token(user_id, email, body.name)
+
+    return AuthResponse(
+        token=token,
+        user={"id": user_id, "name": body.name, "email": email},
+    )
+
+
+@app.post(
+    "/login",
+    response_model=AuthResponse,
+    tags=["Auth"],
+    summary="Login",
+    description="Authenticate with email and password.",
+)
+@limiter.limit("10/minute")
+def login(request: Request, body: LoginRequest):
+    """Validate credentials and return a JWT token."""
+    user = users_collection.find_one({"email": body.email.lower()})
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+        )
+
+    user_id = str(user["_id"])
+    token = create_access_token(user_id, user["email"], user["name"])
+
+    return AuthResponse(
+        token=token,
+        user={"id": user_id, "name": user["name"], "email": user["email"]},
+    )
 
 
 @app.get(
@@ -973,7 +1088,6 @@ def root():
         "message": "Welcome to FinSight AI!",
         "docs": "Visit /docs for the interactive API documentation",
         "health": "Visit /health to check service status",
-        "diagnostics": "Visit /diagnostics for performance monitoring"
     }
 
 

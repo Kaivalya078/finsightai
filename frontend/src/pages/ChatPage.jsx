@@ -7,7 +7,8 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Toaster, toast } from 'react-hot-toast';
-import { askQuestion, checkHealth, uploadPdf } from '../api';
+import { askQuestion, checkHealth, uploadPdf, API_BASE } from '../api';
+import { useAuth } from '../context/AuthContext';
 import useConversations from '../hooks/useConversations';
 import Sidebar from '../components/chat/Sidebar';
 import ChatHeader from '../components/chat/ChatHeader';
@@ -91,6 +92,7 @@ export default function ChatPage() {
         refreshConversations,
     } = useConversations();
 
+    const { isAuthenticated } = useAuth();
     const [isLoading, setIsLoading] = useState(false);
     const [lastQuery, setLastQuery] = useState('');
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -176,13 +178,15 @@ export default function ChatPage() {
                 });
             } catch (err) {
                 const errorMsg = err.message || 'Something went wrong. Is the backend running?';
-                addMessage(convId, 'assistant', `⚠️ Error: ${errorMsg}`, {});
+                // Anonymous trial used up: offer the way forward, not just an error
+                const signIn = err.status === 429 && !isAuthenticated ? ' [Sign in →](/login)' : '';
+                addMessage(convId, 'assistant', `⚠️ ${errorMsg}${signIn}`, {});
                 toast.error(errorMsg, { duration: 4000 });
             } finally {
                 setIsLoading(false);
             }
         },
-        [activeId, activeConversation, addMessage, setConversationId, sessions]
+        [activeId, activeConversation, addMessage, setConversationId, sessions, isAuthenticated]
     );
 
     // --- Upload PDF ---
@@ -284,8 +288,8 @@ export default function ChatPage() {
                 <div className="health-banner">
                     <span className="health-banner-icon">⚠️</span>
                     <span className="health-banner-text">
-                        <strong>Backend unavailable.</strong> Make sure the FastAPI server is running at{' '}
-                        <code>http://localhost:8000</code> before sending questions.
+                        <strong>Backend unavailable.</strong> The API at{' '}
+                        <code>{API_BASE}</code> isn't responding — it may still be starting up.
                     </span>
                     <button
                         className="health-banner-dismiss"
@@ -354,6 +358,7 @@ export default function ChatPage() {
                                 <div className="chat-welcome-prompts">
                                     <h3>Suggested questions</h3>
                                     <div className="chat-prompt-cards">
+                                        {/* Must match SHOWCASE_QUESTIONS in backend/main.py (pre-warmed, instant) */}
                                         {[
                                             { icon: <BarChart2 size={15} />, text: 'Compare TCS and Infosys revenue and profit' },
                                             { icon: <TrendingUp size={15} />, text: 'What are the key risk factors?' },

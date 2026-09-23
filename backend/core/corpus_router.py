@@ -26,7 +26,9 @@ Design:
 from __future__ import annotations
 
 import logging
-import os
+import time
+from collections import OrderedDict
+from config import settings
 from dataclasses import replace as dc_replace
 from typing import Callable, Dict, List, Optional
 
@@ -49,15 +51,22 @@ class CorpusRouter:
 
     def __init__(self, global_corpus: CorpusManager):
         self.global_corpus: CorpusManager = global_corpus
-        self.session_corpora: Dict[str, CorpusManager] = {}
+        # Least recently used first; evicted past SESSION_MAX or when idle
+        # longer than SESSION_TTL_SECONDS (checked lazily on every access).
+        self.session_corpora: "OrderedDict[str, CorpusManager]" = OrderedDict()
+        self._last_used: Dict[str, float] = {}
 
     # =========================================================================
     # SESSION LIFECYCLE
     # =========================================================================
 
     def register_session(self, session_id: str, corpus: CorpusManager) -> None:
-        """Register an in-memory session corpus."""
+        """Register an in-memory session corpus, evicting to stay under the cap."""
+        self._evict_idle()
+        while len(self.session_corpora) >= settings.SESSION_MAX:
+            self.remove_session(next(iter(self.session_corpora)))
         self.session_corpora[session_id] = corpus
+        self._last_used[session_id] = time.monotonic()
         logger.info(
             "Session registered: %s (%d vectors)",
             session_id, corpus.num_chunks,
@@ -67,11 +76,22 @@ class CorpusRouter:
         """Remove a session corpus, freeing its memory."""
         if session_id in self.session_corpora:
             del self.session_corpora[session_id]
+            del self._last_used[session_id]
             logger.info("Session removed: %s", session_id)
 
     def has_session(self, session_id: str) -> bool:
-        """Check if a session exists."""
-        return session_id in self.session_corpora
+        """Check if a session exists (and mark it as used)."""
+        self._evict_idle()
+        if session_id not in self.session_corpora:
+            return False
+        self._last_used[session_id] = time.monotonic()
+        self.session_corpora.move_to_end(session_id)
+        return True
+
+    def _evict_idle(self) -> None:
+        cutoff = time.monotonic() - settings.SESSION_TTL_SECONDS
+        for sid in [s for s, t in self._last_used.items() if t < cutoff]:
+            self.remove_session(sid)
 
     # =========================================================================
     # PLAN EXECUTION
@@ -99,7 +119,7 @@ class CorpusRouter:
             return self.global_corpus.execute_plan(plan, embed_query)
 
         # --- Dual-corpus path ---
-        if session_id not in self.session_corpora:
+        if not self.has_session(session_id):
             raise KeyError(
                 f"Session '{session_id}' not found. "
                 f"Upload a document first via POST /upload."
@@ -127,7 +147,7 @@ class CorpusRouter:
             # This preserves FAISS ranking authority within each source
             merged = _merge_by_score(global_results, session_results)
             # Phase 2: Use RETRIEVAL_K so reranker gets full candidate set
-            merge_limit = int(os.getenv("RETRIEVAL_K", str(sub_query.scope.top_k)))
+            merge_limit = settings.RETRIEVAL_K
             merged = merged[:merge_limit]
 
             per_subquery.append(merged)
@@ -187,7 +207,7 @@ def _apply_merge_strategy(
     reranker receives the full candidate set. Final trim to FINAL_K
     happens in refine_results().
     """
-    merge_limit = int(os.getenv("RETRIEVAL_K", str(plan.final_top_k)))
+    merge_limit = settings.RETRIEVAL_K
 
     if plan.merge_strategy == MergeStrategy.SINGLE:
         return per_subquery[0][:merge_limit]

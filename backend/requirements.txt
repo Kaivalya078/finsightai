@@ -19,7 +19,7 @@ openai>=1.0.0
 rank-bm25>=0.2.2
 
 # Configuration
-python-dotenv>=1.0.0
+pydantic-settings>=2.0.0
 python-multipart
 
 # Auth + Database
@@ -32,3 +32,11 @@ email-validator>=2.1.0
 authlib>=1.3.0
 httpx>=0.27.0
 itsdangerous>=2.1.0
+
+# Rate limiting
+slowapi>=0.1.9
+# Index bootstrap (asset_manager.py)
+requests>=2.31.0
+
+# Tests
+pytest>=8.0.0

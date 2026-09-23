@@ -9,6 +9,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff, ArrowRight, TrendingUp, ArrowLeft } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { API_BASE } from '../api';
 import '../styles/auth.css';
 
 export default function LoginPage() {
@@ -71,10 +72,7 @@ export default function LoginPage() {
                 <button
                     type="button"
                     className="auth-google-btn"
-                    onClick={() => {
-                        const apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
-                        window.location.href = `${apiBase}/auth/login`;
-                    }}
+                    onClick={() => { window.location.href = `${API_BASE}/auth/login`; }}
                 >
                     <svg className="auth-google-icon" viewBox="0 0 24 24" width="20" height="20">
                         <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/>

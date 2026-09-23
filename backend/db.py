@@ -10,19 +10,17 @@ Collections:
 Author: FinSight AI Team
 """
 
-import os
+from config import settings
 from datetime import datetime, timezone
 from pymongo import MongoClient, ASCENDING, DESCENDING
-from dotenv import load_dotenv
 
-load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------------
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("MONGO_DB_NAME", "finsightai")
+MONGO_URI = settings.MONGO_URI
+DB_NAME = settings.MONGO_DB_NAME
 
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
@@ -67,6 +65,7 @@ def upsert_google_user(email: str, name: str, picture: str) -> dict:
     Returns a dict with: _id (str), name, email, profile_picture.
     """
     now = datetime.now(timezone.utc)
+    email = email.lower()  # match /register and /login, which normalize too
     existing = users_collection.find_one({"email": email})
 
     if existing is None:

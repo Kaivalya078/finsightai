@@ -15,7 +15,7 @@ Author: FinSight AI Team
 Phase: 4 (Intelligent Query Understanding)
 """
 
-import os
+from config import settings
 import logging
 from dataclasses import dataclass, field
 from typing import List
@@ -70,9 +70,9 @@ def plan_execution(iq: IntelligentQuery) -> List[RetrievalStep]:
     Returns:
         List of RetrievalStep objects for execution
     """
-    max_steps = int(os.getenv("MAX_RETRIEVAL_STEPS", "4"))
-    full_k = int(os.getenv("RETRIEVAL_K", "20"))
-    multi_k = int(os.getenv("MULTI_STEP_RETRIEVAL_K", "10"))
+    max_steps = settings.MAX_RETRIEVAL_STEPS
+    full_k = settings.RETRIEVAL_K
+    multi_k = settings.MULTI_STEP_RETRIEVAL_K
 
     if iq.intent == "compare" and len(iq.companies) >= 2:
         return _plan_compare(iq, max_steps, multi_k)

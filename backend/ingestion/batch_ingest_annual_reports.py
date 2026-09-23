@@ -16,6 +16,8 @@ Phase 1: Fixed imports, added progress logging
 """
 
 import os
+
+from config import settings
 import re
 import sys
 import time
@@ -25,8 +27,6 @@ from pathlib import Path
 # Add backend root to path so package imports work when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from dotenv import load_dotenv
-load_dotenv()
 
 from core.retriever_pipeline import RetrieverPipeline
 from core.corpus_manager import CorpusManager
@@ -35,7 +35,7 @@ from core.cache_utils import has_leftover_tmp, clean_cache
 
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
-CACHE_DIR = os.getenv("INDEX_CACHE_DIR", "index_cache")
+CACHE_DIR = settings.INDEX_CACHE_DIR
 YEAR_PDF_RE = re.compile(r"^\d{4}\.pdf$")
 
 

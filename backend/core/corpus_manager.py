@@ -24,6 +24,8 @@ Phase: 2.5 (Corpus Architecture)
 """
 
 import os
+
+from config import settings
 import json
 import logging
 import pickle
@@ -51,6 +53,20 @@ logger = logging.getLogger(__name__)
 # CORPUS MANAGER
 # =============================================================================
 
+def pdf_url_for(pdf_path: str) -> str:
+    """
+    Public URL of a source PDF, from the path it was ingested from.
+
+    pdf_path may be a Colab or Windows path, so keep only COMPANY/YEAR.pdf.
+    Served from object storage when HF_PDF_BASE_URL is set, else from this
+    API's /pdfs static mount (local dev).
+    """
+    parts = pdf_path.replace("\\", "/").rstrip("/").split("/")
+    rel = "/".join(parts[-2:])
+    base = settings.HF_PDF_BASE_URL.rstrip("/") or "/pdfs"
+    return f"{base}/{rel}"
+
+
 class CorpusManager:
     """
     Central orchestrator for the corpus-based RAG architecture.
@@ -69,6 +85,11 @@ class CorpusManager:
         corpus.add_document("data/sample.pdf", company="TCS", ...)
         results = corpus.search("What are the risk factors?")
     """
+
+    # False for /upload session corpora: their PDF is a deleted temp file,
+    # so evidence from them must not advertise a PDF link.
+    public_pdfs = True
+
     
     def __init__(self, retriever: RetrieverPipeline):
         """
@@ -272,7 +293,7 @@ class CorpusManager:
             return []
 
         # Phase 2: Use RETRIEVAL_K for expanded candidate pool (reranker needs more candidates)
-        retrieval_k = int(os.getenv("RETRIEVAL_K", str(scope.top_k * 3)))
+        retrieval_k = settings.RETRIEVAL_K
         candidate_k = retrieval_k
 
         raw = self.retriever.search_scoped(
@@ -307,34 +328,10 @@ class CorpusManager:
 
             chunk = self.retriever.chunks[vector_id]
 
-            # Resolve PDF path for the static /pdfs/ route.
-            # pdf_path may be a Colab path (e.g. /content/drive/MyDrive/data/ADANIPORTS/2023.pdf)
-            # so we extract the last 2 segments (COMPANY/YEAR.pdf) which matches
-            # the local data/ directory structure and the /pdfs/ static mount.
-            # Resolve PDF URL
             pdf_url = ""
-
-            for rec in self.documents.values():
+            for rec in (self.documents.values() if self.public_pdfs else ()):
                 if rec.vector_id_start <= vector_id < rec.vector_id_end:
-
-                    parts = rec.pdf_path.replace("\\", "/").rstrip("/").split("/")
-
-                    asset_mode = os.getenv("ASSET_MODE", "local")
-
-                    if asset_mode == "local":
-                        if len(parts) >= 2:
-                            pdf_url = f"/pdfs/{parts[-2]}/{parts[-1]}"
-                        else:
-                            pdf_url = f"/pdfs/{parts[-1]}"
-
-                    else:
-                        hf_base = os.getenv("HF_PDF_BASE_URL", "").rstrip("/")
-
-                        if len(parts) >= 2:
-                            pdf_url = f"{hf_base}/{parts[-2]}/{parts[-1]}"
-                        else:
-                            pdf_url = f"{hf_base}/{parts[-1]}"
-
+                    pdf_url = pdf_url_for(rec.pdf_path)
                     break
 
             results.append(RetrievalResult(
@@ -353,7 +350,7 @@ class CorpusManager:
         # retrieve top_k × N candidates from FAISS, apply threshold,
         # then trim to top_k. This prevents threshold filtering from
         # returning fewer results than expected.
-        threshold = float(os.getenv("SIMILARITY_THRESHOLD", "0.30"))
+        threshold = settings.SIMILARITY_THRESHOLD
         pre_filter_count = len(results)
         results = [r for r in results if r.score >= threshold]
         filtered_count = pre_filter_count - len(results)
@@ -388,7 +385,7 @@ class CorpusManager:
 
         # Phase 2: Use RETRIEVAL_K as merge limit to preserve candidates
         # for the reranker. Final trimming to FINAL_K happens in refine_results().
-        merge_limit = int(os.getenv("RETRIEVAL_K", str(plan.final_top_k)))
+        merge_limit = settings.RETRIEVAL_K
 
         for sub_query in plan.sub_queries:
             vector  = embed_query(sub_query.rewritten_query)
