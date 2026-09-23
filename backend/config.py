@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     # Uploads
     UPLOAD_MAX_MB: int = 25
 
+    # Rate limits (limits-library syntax). Anonymous callers get a daily trial.
+    ANON_FREE_QUESTIONS: int = 5
+    RATE_LIMIT_CHAT: str = "20/minute;300/day"
+
     # Logging
     LOG_LEVEL: str = "INFO"
     QUERY_LOG_ENABLED: bool = False

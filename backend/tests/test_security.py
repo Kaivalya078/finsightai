@@ -124,6 +124,7 @@ def upload_ready(monkeypatch):
     monkeypatch.setattr(main, "RetrieverPipeline", lambda: None)
     monkeypatch.setattr(main, "CorpusManager", FakeCorpus)
     monkeypatch.setattr(main, "corpus_router", SimpleNamespace(register_session=lambda *a: None))
+    main.limiter.reset()
     return TestClient(main.app), seen
 
 
@@ -159,3 +160,52 @@ def test_upload_ignores_client_filename_path(upload_ready):
     written = os.path.realpath(seen["pdf_path"])
     assert os.path.commonpath([tmp, written]) == tmp
     assert os.path.dirname(written) != tmp  # stays inside its own upload dir
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting + anonymous trial
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def limited(app_ready, monkeypatch):
+    """Cached answer for Q, anonymous cap of 2, fresh limiter counters."""
+    main, saved = app_ready
+    monkeypatch.setattr(main.settings, "ANON_FREE_QUESTIONS", 2)
+    main.limiter.reset()
+    main.response_cache.set("Revenue?", {"answer": "a", "citations": [], "evidence": [],
+                                   "metadata": {}, "follow_ups": []})
+    yield TestClient(main.app), saved
+    main.limiter.reset()
+
+
+def test_anonymous_can_ask_without_login_and_nothing_is_saved(limited):
+    client, saved = limited
+    r = client.post("/chat", json={"question": "Revenue?"})
+    assert r.status_code == 200
+    assert r.json()["conversation_id"] is None
+    assert saved == []
+
+
+def test_anonymous_trial_is_capped_with_sign_in_prompt(limited):
+    client, _ = limited
+    for _ in range(2):
+        assert client.post("/chat", json={"question": "Revenue?"}).status_code == 200
+    r = client.post("/chat", json={"question": "Revenue?"})
+    assert r.status_code == 429
+    assert "sign in" in r.json()["detail"].lower()
+
+
+def test_signed_in_user_is_not_held_to_the_anonymous_cap(limited):
+    client, _ = limited
+    for _ in range(3):
+        assert client.post("/chat", json={"question": "Revenue?"}, headers=_auth("alice")).status_code == 200
+
+
+def test_login_is_rate_limited_per_ip(limited, monkeypatch):
+    import main
+    client, _ = limited
+    monkeypatch.setattr(main, "users_collection", SimpleNamespace(find_one=lambda q: None))
+    codes = [client.post("/login", json={"email": "a@x.io", "password": "p"}).status_code
+             for _ in range(11)]
+    assert codes[:10] == [401] * 10
+    assert codes[10] == 429

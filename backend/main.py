@@ -22,11 +22,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 # FastAPI imports
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, EmailStr
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from asset_manager import ensure_index_cache
 
 # Auth + Database
@@ -35,7 +39,9 @@ from auth import (
     hash_password,
     verify_password,
     create_access_token,
+    decode_access_token,
     get_current_user,
+    get_optional_user,
 )
 from bson import ObjectId
 
@@ -451,6 +457,39 @@ app.add_middleware(
     secret_key=JWT_SECRET,
 )
 
+def _rate_key(request: Request) -> str:
+    """Signed-in callers are limited per account, everyone else per IP."""
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        try:
+            return "user:" + decode_access_token(auth_header[7:])["sub"]
+        except HTTPException:
+            pass
+    return "ip:" + get_remote_address(request)
+
+
+def _chat_limit(key: str) -> str:
+    if key.startswith("ip:"):
+        return f"{settings.ANON_FREE_QUESTIONS}/day"
+    return settings.RATE_LIMIT_CHAT
+
+
+# ponytail: in-memory counters, per process, reset on restart. Pass
+# storage_uri="redis://..." before running more than one worker.
+limiter = Limiter(key_func=_rate_key)
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+def _rate_limited(request: Request, exc: RateLimitExceeded):
+    if request.url.path == "/chat" and _rate_key(request).startswith("ip:"):
+        detail = (f"You've used your {settings.ANON_FREE_QUESTIONS} free questions for today. "
+                  "Sign in to keep asking.")
+    else:
+        detail = f"Too many requests ({exc.detail}). Please wait and try again."
+    return JSONResponse(status_code=429, content={"detail": detail})
+
+
 # Google OAuth router
 from routers.google_auth import router as google_auth_router
 
@@ -512,7 +551,9 @@ def health_check():
     summary="Upload PDF",
     description="Upload a PDF document for session-scoped retrieval.",
 )
+@limiter.limit("5/hour")
 def upload_document(
+    request: Request,
     file: UploadFile = File(..., description="PDF file to upload"),
     company_name: str = Form(..., description="Company name for the document"),
     year: Optional[str] = Form(default=None, description="Fiscal year (e.g. '2024')"),
@@ -621,7 +662,8 @@ def upload_document(
     summary="Semantic Retrieval",
     description="Find the most relevant chunks for a given query."
 )
-def retrieve(request: RetrieveRequest):
+@limiter.limit("30/minute")
+def retrieve(request: Request, body: RetrieveRequest):
     """
     Main retrieval endpoint.
 
@@ -652,27 +694,27 @@ def retrieve(request: RetrieveRequest):
         )
 
     # Get top_k (use request value or default from env)
-    top_k = request.top_k if request.top_k is not None else settings.TOP_K
+    top_k = body.top_k if body.top_k is not None else settings.TOP_K
 
     try:
         final_k = settings.FINAL_K
         parsed = None
 
-        if request.session_id is not None:
+        if body.session_id is not None:
             # Session path: build plan manually, route through corpus_router
             entities = corpus_manager.list_available_entities()
             companies = entities.get("companies", [])
-            parsed = parse_query(request.query, companies)
+            parsed = parse_query(body.query, companies)
             plan = build_plan(parsed, top_k)
             results = corpus_router.execute_plan(
                 plan,
                 embed_query=lambda q: pipeline.embed_query(q),
-                session_id=request.session_id,
+                session_id=body.session_id,
             )
         else:
             # Global-only path: use standard orchestrator
             results, parsed = retrieve_context(
-                raw_query=request.query,
+                raw_query=body.query,
                 corpus_manager=corpus_manager,
                 embed_query=lambda q: pipeline.embed_query(q),
                 default_top_k=top_k,
@@ -681,7 +723,7 @@ def retrieve(request: RetrieveRequest):
         # Phase 2: Refinement pipeline (rerank → boost → dedup → enrich)
         results = refine_results(
             results=results,
-            query=request.query,
+            query=body.query,
             parsed_query=parsed,
             all_chunks=pipeline.chunks,
             chunk_metadata=corpus_manager.chunk_metadata,
@@ -699,7 +741,7 @@ def retrieve(request: RetrieveRequest):
         ]
 
         return RetrieveResponse(
-            query=request.query,
+            query=body.query,
             top_k=len(result_items),
             results=result_items,
             filtered_count=top_k - len(result_items) if len(result_items) < top_k else 0,
@@ -896,7 +938,9 @@ def persist_exchange(user_id: str, conversation_id: Optional[str],
     summary="RAG Chat",
     description="Ask a question and get an AI-generated answer grounded in the document."
 )
-def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit(_chat_limit)
+def chat(request: Request, body: ChatRequest,
+         current_user: Optional[dict] = Depends(get_optional_user)):
     """Answer (fresh or cached), then persist to the caller's conversation."""
     if corpus_manager is None or not corpus_manager.is_indexed:
         raise HTTPException(
@@ -910,7 +954,7 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
         )
 
     try:
-        payload = answer_question(request.question, request.session_id, request.top_k)
+        payload = answer_question(body.question, body.session_id, body.top_k)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -920,9 +964,12 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation error: {str(e)}")
 
-    conv_id = persist_exchange(
-        current_user["user_id"], request.conversation_id, request.question, payload
-    )
+    # Anonymous trial answers aren't saved; there is no account to save them to.
+    conv_id = None
+    if current_user:
+        conv_id = persist_exchange(
+            current_user["user_id"], body.conversation_id, body.question, payload
+        )
     return ChatResponse(**payload, conversation_id=conv_id)
 
 
@@ -937,9 +984,10 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     summary="Register",
     description="Create a new user account.",
 )
-def register(request: RegisterRequest):
+@limiter.limit("10/minute")
+def register(request: Request, body: RegisterRequest):
     """Register a new user with name, email, and password."""
-    email = request.email.lower()
+    email = body.email.lower()
 
     # Check for duplicate email
     if users_collection.find_one({"email": email}):
@@ -950,19 +998,19 @@ def register(request: RegisterRequest):
 
     now = datetime.now(timezone.utc)
     user_doc = {
-        "name": request.name,
+        "name": body.name,
         "email": email,
-        "password_hash": hash_password(request.password),
+        "password_hash": hash_password(body.password),
         "created_at": now,
     }
     result = users_collection.insert_one(user_doc)
     user_id = str(result.inserted_id)
 
-    token = create_access_token(user_id, email, request.name)
+    token = create_access_token(user_id, email, body.name)
 
     return AuthResponse(
         token=token,
-        user={"id": user_id, "name": request.name, "email": email},
+        user={"id": user_id, "name": body.name, "email": email},
     )
 
 
@@ -973,10 +1021,11 @@ def register(request: RegisterRequest):
     summary="Login",
     description="Authenticate with email and password.",
 )
-def login(request: LoginRequest):
+@limiter.limit("10/minute")
+def login(request: Request, body: LoginRequest):
     """Validate credentials and return a JWT token."""
-    user = users_collection.find_one({"email": request.email.lower()})
-    if not user or not verify_password(request.password, user["password_hash"]):
+    user = users_collection.find_one({"email": body.email.lower()})
+    if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password.",

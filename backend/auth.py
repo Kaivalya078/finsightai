@@ -35,6 +35,7 @@ JWT_EXPIRY_HOURS = 24
 
 # FastAPI security scheme — expects "Authorization: Bearer <token>"
 _bearer_scheme = HTTPBearer()
+_optional_bearer = HTTPBearer(auto_error=False)
 
 # ---------------------------------------------------------------------------
 # Google OAuth (Authlib)
@@ -145,3 +146,12 @@ async def get_current_user(
         "email": payload.get("email", ""),
         "name": payload.get("name", ""),
     }
+
+
+async def get_optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_optional_bearer),
+) -> Optional[dict]:
+    """Like get_current_user, but None for anonymous callers. A bad token still 401s."""
+    if credentials is None:
+        return None
+    return await get_current_user(credentials)
