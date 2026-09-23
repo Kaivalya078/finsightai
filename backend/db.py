@@ -67,6 +67,7 @@ def upsert_google_user(email: str, name: str, picture: str) -> dict:
     Returns a dict with: _id (str), name, email, profile_picture.
     """
     now = datetime.now(timezone.utc)
+    email = email.lower()  # match /register and /login, which normalize too
     existing = users_collection.find_one({"email": email})
 
     if existing is None:

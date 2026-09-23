@@ -959,6 +959,71 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
         )
 
 
+# =============================================================================
+# AUTHENTICATION ENDPOINTS
+# =============================================================================
+
+@app.post(
+    "/register",
+    response_model=AuthResponse,
+    tags=["Auth"],
+    summary="Register",
+    description="Create a new user account.",
+)
+def register(request: RegisterRequest):
+    """Register a new user with name, email, and password."""
+    email = request.email.lower()
+
+    # Check for duplicate email
+    if users_collection.find_one({"email": email}):
+        raise HTTPException(
+            status_code=409,
+            detail="An account with this email already exists.",
+        )
+
+    now = datetime.now(timezone.utc)
+    user_doc = {
+        "name": request.name,
+        "email": email,
+        "password_hash": hash_password(request.password),
+        "created_at": now,
+    }
+    result = users_collection.insert_one(user_doc)
+    user_id = str(result.inserted_id)
+
+    token = create_access_token(user_id, email, request.name)
+
+    return AuthResponse(
+        token=token,
+        user={"id": user_id, "name": request.name, "email": email},
+    )
+
+
+@app.post(
+    "/login",
+    response_model=AuthResponse,
+    tags=["Auth"],
+    summary="Login",
+    description="Authenticate with email and password.",
+)
+def login(request: LoginRequest):
+    """Validate credentials and return a JWT token."""
+    user = users_collection.find_one({"email": request.email.lower()})
+    if not user or not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+        )
+
+    user_id = str(user["_id"])
+    token = create_access_token(user_id, user["email"], user["name"])
+
+    return AuthResponse(
+        token=token,
+        user={"id": user_id, "name": user["name"], "email": user["email"]},
+    )
+
+
 @app.get(
     "/",
     tags=["System"],
