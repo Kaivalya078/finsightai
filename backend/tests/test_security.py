@@ -94,3 +94,68 @@ def test_cache_hit_is_persisted_per_user(app_ready):
     assert b2["conversation_id"] == "conv-bob"
     assert saved == [("create", "alice", q), ("create", "bob", q), ("append", "bob", "conv-bob")]
     assert a["metadata"]["cached"] is True
+
+
+# ---------------------------------------------------------------------------
+# /upload: auth, PDF-only, size cap, no client-controlled paths
+# ---------------------------------------------------------------------------
+
+import tempfile
+
+PDF = b"%PDF-1.7\n" + b"0" * 100
+
+
+@pytest.fixture
+def upload_ready(monkeypatch):
+    """main.app with ingestion faked out; records the path handed to it."""
+    import main
+    seen = {}
+
+    class FakeCorpus:
+        num_chunks = 3
+
+        def __init__(self, *_):
+            pass
+
+        def add_document(self, pdf_path, **_):
+            seen["pdf_path"] = pdf_path
+            return 3
+
+    monkeypatch.setattr(main, "RetrieverPipeline", lambda: None)
+    monkeypatch.setattr(main, "CorpusManager", FakeCorpus)
+    monkeypatch.setattr(main, "corpus_router", SimpleNamespace(register_session=lambda *a: None))
+    return TestClient(main.app), seen
+
+
+def _upload(client, data, filename="report.pdf", headers=None):
+    return client.post("/upload", files={"file": (filename, data, "application/pdf")},
+                       data={"company_name": "ACME"}, headers=headers)
+
+
+def test_upload_requires_login(upload_ready):
+    client, _ = upload_ready
+    assert _upload(client, PDF).status_code == 401
+
+
+def test_upload_rejects_non_pdf_bytes(upload_ready):
+    client, _ = upload_ready
+    r = _upload(client, b"MZ\x90\x00 not a pdf", headers=_auth("alice"))
+    assert r.status_code == 415
+
+
+def test_upload_rejects_oversize(upload_ready, monkeypatch):
+    import main
+    client, _ = upload_ready
+    monkeypatch.setattr(main.settings, "UPLOAD_MAX_MB", 1)
+    r = _upload(client, PDF + b"0" * (1024 * 1024), headers=_auth("alice"))
+    assert r.status_code == 413
+
+
+def test_upload_ignores_client_filename_path(upload_ready):
+    client, seen = upload_ready
+    r = _upload(client, PDF, filename="../../escape.pdf", headers=_auth("alice"))
+    assert r.status_code == 200
+    tmp = os.path.realpath(tempfile.gettempdir())
+    written = os.path.realpath(seen["pdf_path"])
+    assert os.path.commonpath([tmp, written]) == tmp
+    assert os.path.dirname(written) != tmp  # stays inside its own upload dir

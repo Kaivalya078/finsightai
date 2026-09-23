@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     HF_CACHE_URL: str = ""
     HF_PDF_BASE_URL: str = ""
 
+    # Uploads
+    UPLOAD_MAX_MB: int = 25
+
     # Logging
     LOG_LEVEL: str = "INFO"
     QUERY_LOG_ENABLED: bool = False

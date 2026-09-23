@@ -519,6 +519,7 @@ def upload_document(
     document_type: Optional[str] = Form(
         default=None, description="Document type (default: 'Annual_Report')"
     ),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Upload a PDF for session-scoped retrieval.
@@ -548,14 +549,29 @@ def upload_document(
     year = year or "2024"
     document_type = document_type or "Annual_Report"
 
+    # Reject non-PDFs by content, not by the client-supplied name or type
+    if file.file.read(5) != b"%PDF-":
+        raise HTTPException(status_code=415, detail="Only PDF files are accepted.")
+    file.file.seek(0)
+    max_bytes = settings.UPLOAD_MAX_MB * 1024 * 1024
+
     # Save uploaded file to a temp location
     tmp_dir = None
     try:
         tmp_dir = tempfile.mkdtemp(prefix="finsight_upload_")
-        tmp_path = os.path.join(tmp_dir, file.filename or "upload.pdf")
+        # Fixed name: file.filename is client-controlled ("../../x" escapes tmp_dir)
+        tmp_path = os.path.join(tmp_dir, "upload.pdf")
 
+        written = 0
         with open(tmp_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+            while chunk := file.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"PDF exceeds the {settings.UPLOAD_MAX_MB} MB limit.",
+                    )
+                f.write(chunk)
 
         # Create isolated pipeline + corpus (shares embedding model weights)
         session_pipeline = RetrieverPipeline()
@@ -581,6 +597,8 @@ def upload_document(
             document_type=document_type,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
