@@ -89,8 +89,9 @@ export async function askQuestion(question, sessionId = null, conversationId = n
         handle401(response);
         if (!response.ok) {
             const errorData = await response.json().catch(() => null);
-            const message = errorData?.detail || `Server error (${response.status})`;
-            throw new Error(message);
+            const error = new Error(errorData?.detail || `Server error (${response.status})`);
+            error.status = response.status;
+            throw error;
         }
         return response.json();
     } finally {

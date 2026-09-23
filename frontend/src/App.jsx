@@ -12,7 +12,6 @@ import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import ChatPage from './pages/ChatPage';
 import AuthCallbackPage from './pages/AuthCallbackPage';
-import ProtectedRoute from './components/shared/ProtectedRoute';
 import "./App.css";
 
 function AnimatedRoutes() {
@@ -39,11 +38,8 @@ function AnimatedRoutes() {
         <Route path="/auth/callback" element={
           <AuthCallbackPage />
         } />
-        <Route path="/chat" element={
-          <ProtectedRoute>
-            <ChatPage />
-          </ProtectedRoute>
-        } />
+        {/* Open without login: anonymous visitors get a free trial (backend-capped) */}
+        <Route path="/chat" element={<ChatPage />} />
       </Routes>
     </AnimatePresence>
   );
