@@ -25,7 +25,7 @@ cd backend
 python -m venv venv
 venv\Scripts\activate          # Mac/Linux: source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env           # then set OPENAI_API_KEY
+cp .env.example .env           # then set JWT_SECRET, OPENAI_API_KEY, MONGO_URI
 uvicorn main:app --reload      # http://localhost:8000/docs
 ```
 
@@ -34,7 +34,7 @@ uvicorn main:app --reload      # http://localhost:8000/docs
 PDFs are not committed. Place them at `backend/data/<SYMBOL>/<YEAR>.pdf`, then:
 
 ```bash
-python batch_ingest_annual_reports.py
+python ingestion/batch_ingest_annual_reports.py
 ```
 
 The FAISS index is cached in `backend/index_cache/` (git-ignored). You can also upload a PDF at runtime via `POST /upload`.
@@ -60,7 +60,7 @@ The frontend calls the API at `http://localhost:8000` (see `frontend/src/api.js`
 
 ## Configuration
 
-See `backend/.env.example` (`OPENAI_API_KEY`, `OPENAI_MODEL`, `EMBEDDING_MODEL`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `INDEX_CACHE_DIR`). Never commit `.env`.
+Every setting is a field in `backend/config.py`, documented in `backend/.env.example`. The API refuses to start without a real `JWT_SECRET`, and rejects `.env` keys it doesn't know. Never commit `.env`.
 
 ## Tests
 
@@ -68,3 +68,49 @@ See `backend/.env.example` (`OPENAI_API_KEY`, `OPENAI_MODEL`, `EMBEDDING_MODEL`,
 cd backend
 python -m pytest
 ```
+
+## Deploy
+
+Frontend on Vercel; API on one Linux box (Oracle Always Free ARM, or a Hetzner CX22) behind Caddy, which handles HTTPS. MongoDB Atlas M0 for users and chats, Cloudflare R2 for the PDFs.
+
+**1. Publish the index.** From a machine that has `backend/index_cache/`:
+
+```bash
+cd backend && tar czf index_cache.tar.gz index_cache
+```
+
+Upload it anywhere with a public URL (R2, or a Hugging Face dataset). That URL is `HF_CACHE_URL`; the API downloads it into a Docker volume on first boot.
+
+**2. PDFs to R2.** Create a bucket, enable its public URL, and upload `backend/data/` keeping the `SYMBOL/YEAR.pdf` layout (e.g. `rclone copy backend/data r2:cognifin-pdfs`). The bucket's public URL is `HF_PDF_BASE_URL`. The PDF viewer fetches byte ranges cross-origin, so add this CORS policy to the bucket:
+
+```json
+[{"AllowedOrigins": ["https://YOUR-APP.vercel.app"], "AllowedMethods": ["GET", "HEAD"],
+  "AllowedHeaders": ["Range"], "ExposeHeaders": ["Accept-Ranges", "Content-Range", "Content-Length"],
+  "MaxAgeSeconds": 86400}]
+```
+
+**3. MongoDB Atlas.** Create an M0 cluster and allow the server's IP under Network Access. The connection string is `MONGO_URI`.
+
+**4. The API box.** Point a DNS A record (e.g. `api.example.com`) at the server and open ports 80 and 443. On Oracle, open them in the VCN security list *and* in the instance's own iptables, which blocks everything but SSH by default. Then:
+
+```bash
+git clone <this repo> && cd Cognifin
+cp backend/.env.example backend/.env   # fill in the values below
+echo "API_DOMAIN=api.example.com" > .env
+docker compose up -d --build
+docker compose logs -f api             # first boot downloads + loads the index
+```
+
+Production values in `backend/.env` (compose sets `ASSET_MODE` and `INDEX_CACHE_DIR` itself):
+
+| Key | Value |
+|---|---|
+| `JWT_SECRET` | a fresh `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `OPENAI_API_KEY`, `MONGO_URI` | from steps 3 and your provider |
+| `HF_CACHE_URL`, `HF_PDF_BASE_URL` | from steps 1 and 2 |
+| `ALLOWED_ORIGINS`, `FRONTEND_URL` | `https://YOUR-APP.vercel.app` |
+| `GOOGLE_REDIRECT_URI` | `https://api.example.com/auth/callback` (also add it in Google Cloud Console) |
+
+**5. Vercel.** Import the repo with root directory `frontend` and set `VITE_API_BASE=https://api.example.com` and `VITE_SITE_URL=https://YOUR-APP.vercel.app`. The build fails on purpose if `VITE_API_BASE` isn't an https URL.
+
+**6. Check it.** `curl https://api.example.com/health` should report `"indexed": true`. On the site, a suggested question answers instantly (pre-warmed at boot). Logged out, the 6th question returns the sign-in prompt. A citation's PDF opens from R2.
