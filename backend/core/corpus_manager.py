@@ -53,6 +53,20 @@ logger = logging.getLogger(__name__)
 # CORPUS MANAGER
 # =============================================================================
 
+def pdf_url_for(pdf_path: str) -> str:
+    """
+    Public URL of a source PDF, from the path it was ingested from.
+
+    pdf_path may be a Colab or Windows path, so keep only COMPANY/YEAR.pdf.
+    Served from object storage when HF_PDF_BASE_URL is set, else from this
+    API's /pdfs static mount (local dev).
+    """
+    parts = pdf_path.replace("\\", "/").rstrip("/").split("/")
+    rel = "/".join(parts[-2:])
+    base = settings.HF_PDF_BASE_URL.rstrip("/") or "/pdfs"
+    return f"{base}/{rel}"
+
+
 class CorpusManager:
     """
     Central orchestrator for the corpus-based RAG architecture.
@@ -309,34 +323,10 @@ class CorpusManager:
 
             chunk = self.retriever.chunks[vector_id]
 
-            # Resolve PDF path for the static /pdfs/ route.
-            # pdf_path may be a Colab path (e.g. /content/drive/MyDrive/data/ADANIPORTS/2023.pdf)
-            # so we extract the last 2 segments (COMPANY/YEAR.pdf) which matches
-            # the local data/ directory structure and the /pdfs/ static mount.
-            # Resolve PDF URL
             pdf_url = ""
-
             for rec in self.documents.values():
                 if rec.vector_id_start <= vector_id < rec.vector_id_end:
-
-                    parts = rec.pdf_path.replace("\\", "/").rstrip("/").split("/")
-
-                    asset_mode = settings.ASSET_MODE
-
-                    if asset_mode == "local":
-                        if len(parts) >= 2:
-                            pdf_url = f"/pdfs/{parts[-2]}/{parts[-1]}"
-                        else:
-                            pdf_url = f"/pdfs/{parts[-1]}"
-
-                    else:
-                        hf_base = settings.HF_PDF_BASE_URL.rstrip("/")
-
-                        if len(parts) >= 2:
-                            pdf_url = f"{hf_base}/{parts[-2]}/{parts[-1]}"
-                        else:
-                            pdf_url = f"{hf_base}/{parts[-1]}"
-
+                    pdf_url = pdf_url_for(rec.pdf_path)
                     break
 
             results.append(RetrievalResult(

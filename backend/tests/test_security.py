@@ -308,3 +308,18 @@ def test_hallucinated_citations_are_flagged(fake_pipeline):
     check = main.answer_question("TCS revenue in 2024")["metadata"]["citation_check"]
     assert check["valid_citations"] == ["chunk_7"]
     assert check["invalid_citations"] == ["chunk_99"]
+
+
+# ---------------------------------------------------------------------------
+# PDF links: object storage whenever HF_PDF_BASE_URL is set
+# ---------------------------------------------------------------------------
+
+def test_pdf_url_prefers_object_storage(monkeypatch):
+    from config import settings
+    from core.corpus_manager import pdf_url_for
+    colab = "/content/drive/MyDrive/data/TCS/2024.pdf"
+    monkeypatch.setattr(settings, "ASSET_MODE", "local")
+    monkeypatch.setattr(settings, "HF_PDF_BASE_URL", "https://pdfs.example.com/")
+    assert pdf_url_for(colab) == "https://pdfs.example.com/TCS/2024.pdf"
+    monkeypatch.setattr(settings, "HF_PDF_BASE_URL", "")
+    assert pdf_url_for(r"C:\repo\backend\data\TCS\2024.pdf") == "/pdfs/TCS/2024.pdf"

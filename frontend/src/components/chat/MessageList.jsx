@@ -17,6 +17,7 @@ import { Copy, Check, ChevronDown, ChevronUp, FileText } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import PDFViewerModal from './PDFViewerModal';
 import LoadingIndicator from './LoadingIndicator';
+import { API_BASE } from '../../api';
 
 const WORD_INTERVAL_MS = 22;
 
@@ -349,19 +350,11 @@ function EvidenceChunk({ item }) {
         ? `${item.document_label}${item.page_number > 0 ? ` · Page ${item.page_number}` : ''}`
         : item.chunk_id;
 
-    // Backend serves PDFs from /pdfs/<company>/<year>.pdf
-    // pdf_filename may contain stale Colab paths from cached responses
-    // (e.g. "content/drive/MyDrive/data/ADANIPORTS/2023.pdf")
-    // so we always extract just the last 2 segments: "COMPANY/YEAR.pdf"
-    const pdfUrl = (() => {
-        if (!item.pdf_filename) return null;
-        const segments = item.pdf_filename.replace(/\\/g, '/').split('/').filter(Boolean);
-        const cleanPath = segments.length >= 2
-            ? `${segments[segments.length - 2]}/${segments[segments.length - 1]}`
-            : segments[segments.length - 1] || null;
-        if (!cleanPath) return null;
-        return `${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/pdfs/${cleanPath}`;
-    })();
+    // pdf_url is absolute when PDFs live in object storage, or an API path
+    // (/pdfs/COMPANY/YEAR.pdf) when the backend serves them itself.
+    const pdfUrl = !item.pdf_url ? null
+        : /^https?:\/\//.test(item.pdf_url) ? item.pdf_url
+        : `${API_BASE}${item.pdf_url}`;
 
     return (
         <>
