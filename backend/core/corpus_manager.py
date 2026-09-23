@@ -85,6 +85,11 @@ class CorpusManager:
         corpus.add_document("data/sample.pdf", company="TCS", ...)
         results = corpus.search("What are the risk factors?")
     """
+
+    # False for /upload session corpora: their PDF is a deleted temp file,
+    # so evidence from them must not advertise a PDF link.
+    public_pdfs = True
+
     
     def __init__(self, retriever: RetrieverPipeline):
         """
@@ -324,7 +329,7 @@ class CorpusManager:
             chunk = self.retriever.chunks[vector_id]
 
             pdf_url = ""
-            for rec in self.documents.values():
+            for rec in (self.documents.values() if self.public_pdfs else ()):
                 if rec.vector_id_start <= vector_id < rec.vector_id_end:
                     pdf_url = pdf_url_for(rec.pdf_path)
                     break

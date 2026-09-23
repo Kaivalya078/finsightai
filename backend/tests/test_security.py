@@ -119,6 +119,7 @@ def upload_ready(monkeypatch):
 
         def add_document(self, pdf_path, **_):
             seen["pdf_path"] = pdf_path
+            seen["corpus"] = self
             return 3
 
     monkeypatch.setattr(main, "RetrieverPipeline", lambda: None)
@@ -340,3 +341,10 @@ def test_showcase_questions_are_prewarmed_and_never_expire(fake_pipeline, monkey
     main.response_cache.set("ordinary question", {"answer": "x"})
     monkeypatch.setattr(rc.time, "time", lambda: later + main.settings.CACHE_TTL_SECONDS + 1)
     assert main.response_cache.get("ordinary question") is None
+
+
+def test_uploaded_pdf_evidence_gets_no_dead_pdf_link(upload_ready):
+    """The upload is a temp file deleted after ingestion: nothing to link to."""
+    client, seen = upload_ready
+    assert _upload(client, PDF, headers=_auth("alice")).status_code == 200
+    assert seen["corpus"].public_pdfs is False

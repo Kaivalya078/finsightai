@@ -618,6 +618,7 @@ def upload_document(
         # Create isolated pipeline + corpus (shares embedding model weights)
         session_pipeline = RetrieverPipeline()
         session_corpus = CorpusManager(session_pipeline)
+        session_corpus.public_pdfs = False  # temp file, deleted below
 
         # Ingest into session corpus (in-memory only)
         num_chunks = session_corpus.add_document(
