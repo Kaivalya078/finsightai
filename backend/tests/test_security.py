@@ -262,3 +262,49 @@ def test_tarball_cannot_write_outside_its_dir(remote_assets, tmp_path):
         asset_manager.ensure_index_cache(str(cache_dir))
     assert not list(tmp_path.rglob("evil.txt"))
     assert not cache_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# Generation wiring: intent prompts + citation verification
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fake_pipeline(monkeypatch):
+    """answer_question() over one fake chunk; records the system prompt sent."""
+    import main
+    from core.metadata_schema import RetrievalResult
+    sent = {}
+    chunk = RetrievalResult(chunk_id="chunk_7", score=0.8, snippet="Revenue rose 10%.")
+
+    def generate(system_prompt, user_message):
+        sent["system"] = system_prompt
+        return "Revenue rose 10% (chunk_7). Margins held at 20% (chunk_99)."
+
+    def retrieve_context(raw_query, **_):
+        intent = "comparison" if " vs " in raw_query else "single_entity"
+        return [chunk], SimpleNamespace(intent=intent)
+
+    monkeypatch.setattr(main, "corpus_manager", SimpleNamespace(is_indexed=True, chunk_metadata={}))
+    monkeypatch.setattr(main, "pipeline", SimpleNamespace(chunks=[]))
+    monkeypatch.setattr(main, "llm_client", SimpleNamespace(is_configured=True, model="t", generate=generate))
+    monkeypatch.setattr(main, "retrieve_context", retrieve_context)
+    monkeypatch.setattr(main, "refine_results", lambda results, **_: results)
+    monkeypatch.setattr(main, "is_intelligent_parsing_enabled", lambda: False)
+    main.response_cache.invalidate_all()
+    yield main, sent
+    main.response_cache.invalidate_all()
+
+
+def test_comparison_question_gets_comparison_prompt(fake_pipeline):
+    main, sent = fake_pipeline
+    main.answer_question("TCS vs Infosys revenue")
+    assert "COMPARISON" in sent["system"]
+    main.answer_question("TCS revenue in 2024")
+    assert "COMPARISON" not in sent["system"]
+
+
+def test_hallucinated_citations_are_flagged(fake_pipeline):
+    main, _ = fake_pipeline
+    check = main.answer_question("TCS revenue in 2024")["metadata"]["citation_check"]
+    assert check["valid_citations"] == ["chunk_7"]
+    assert check["invalid_citations"] == ["chunk_99"]

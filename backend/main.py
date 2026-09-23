@@ -98,9 +98,6 @@ from core.citation_verifier import verify_citations
 from core.response_cache import response_cache
 from core.latency_tracker import LatencyTracker, latency_stats
 
-# Phase 7: Query logging
-from core.query_logger import log_query, get_query_stats, get_recent_logs
-
 from config import settings
 from auth import JWT_SECRET
 
@@ -760,6 +757,11 @@ def retrieve(request: Request, body: RetrieveRequest):
 # PHASE 2: CHAT ENDPOINT (RAG Generation)
 # =============================================================================
 
+# Query intent (rule-based or intelligent parser) → intent_prompts.py template
+_STRUCTURED_PROMPTS = {"comparison": "compare", "compare": "compare",
+                       "temporal": "trend", "trend": "trend"}
+
+
 def answer_question(question: str, session_id: Optional[str] = None,
                     top_k: Optional[int] = None) -> dict:
     """
@@ -856,14 +858,21 @@ def answer_question(question: str, session_id: Optional[str] = None,
 
         context, chunk_ids = build_context(results)
 
-    # Build the prompt and generate
-    system_prompt, user_message = build_prompt(context, question)
+    # Build the prompt and generate. Comparisons and trends get prompts that
+    # demand tables over entities/periods; everything else keeps the generic
+    # prompt, whose grounding rules are tuned against over-refusal.
+    prompt_intent = _STRUCTURED_PROMPTS.get(intent)
+    if prompt_intent:
+        system_prompt, user_message = build_intent_prompt(context, question, prompt_intent)
+    else:
+        system_prompt, user_message = build_prompt(context, question)
     print(f"🤖 Generating answer with {llm_client.model}...")
     raw_answer = llm_client.generate(system_prompt, user_message)
 
     answer, follow_ups = extract_follow_ups(raw_answer)
     citations = extract_citations(answer, chunk_ids)
     confidence, conf_label = compute_confidence(results, answer, question, citations)
+    citation_check = verify_citations(answer, chunk_ids)
 
     evidence = [
         EvidenceItem(
@@ -901,6 +910,7 @@ def answer_question(question: str, session_id: Optional[str] = None,
             "top_score": round(top_score, 3),
             "cached": False,
             "model": llm_client.model,
+            "citation_check": citation_check,
         },
         "follow_ups": follow_ups,
     }
@@ -1054,7 +1064,6 @@ def root():
         "message": "Welcome to FinSight AI!",
         "docs": "Visit /docs for the interactive API documentation",
         "health": "Visit /health to check service status",
-        "diagnostics": "Visit /diagnostics for performance monitoring"
     }
 
 

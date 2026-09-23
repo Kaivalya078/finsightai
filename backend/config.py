@@ -104,7 +104,6 @@ class Settings(BaseSettings):
 
     # Logging
     LOG_LEVEL: str = "INFO"
-    QUERY_LOG_ENABLED: bool = False
 
 
 settings = Settings()
