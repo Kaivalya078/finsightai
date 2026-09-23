@@ -58,6 +58,10 @@ _SCOPED_DENSITY_MULTIPLIER: int = 4
 _SCOPED_INITIAL_MULTIPLIER: int = 3
 logger = logging.getLogger(__name__)
 
+# One SentenceTransformer per model name for the whole process. Every /upload
+# builds a RetrieverPipeline; without this each one loaded its own copy.
+_MODELS: Dict[str, "SentenceTransformer"] = {}
+
 
 # =============================================================================
 # CROSS-ENVIRONMENT PICKLE LOADER
@@ -333,9 +337,10 @@ class RetrieverPipeline:
         print(f"🤖 Loading embedding model: {model_name}")
         print("   (This may take a minute on first run as the model downloads...)")
         
-        # Load the embedding model
-        # SentenceTransformer automatically downloads and caches the model
-        self.model = SentenceTransformer(model_name)
+        # Load the embedding model once per process (downloads on first run)
+        if model_name not in _MODELS:
+            _MODELS[model_name] = SentenceTransformer(model_name)
+        self.model = _MODELS[model_name]
         
         # Get embedding dimension (needed for FAISS)
         # For 'all-MiniLM-L6-v2', this is 384

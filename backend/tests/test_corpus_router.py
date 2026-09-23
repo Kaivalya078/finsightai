@@ -267,3 +267,51 @@ class TestDualCorpus(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# =============================================================================
+# SESSION EVICTION (uploads must not accumulate until OOM)
+# =============================================================================
+
+def test_sessions_capped_oldest_evicted(monkeypatch):
+    from config import settings
+    monkeypatch.setattr(settings, "SESSION_MAX", 2)
+    router = CorpusRouter(make_cm())
+    for sid in ("s1", "s2", "s3"):
+        router.register_session(sid, make_cm())
+    assert [router.has_session(s) for s in ("s1", "s2", "s3")] == [False, True, True]
+
+
+def test_idle_sessions_expire(monkeypatch):
+    import core.corpus_router as cr
+    from config import settings
+    monkeypatch.setattr(settings, "SESSION_TTL_SECONDS", 60)
+    now = [1000.0]
+    monkeypatch.setattr(cr.time, "monotonic", lambda: now[0])
+    router = CorpusRouter(make_cm())
+    router.register_session("s1", make_cm())
+    now[0] += 59
+    assert router.has_session("s1")      # access refreshes the idle clock
+    now[0] += 59
+    assert router.has_session("s1")
+    now[0] += 61
+    assert not router.has_session("s1")
+
+
+def test_upload_pipelines_share_one_embedding_model(monkeypatch):
+    """Each /upload builds a RetrieverPipeline; it must not load its own model copy."""
+    import core.retriever_pipeline as rp
+    loads = []
+
+    class FakeModel:
+        def __init__(self, name):
+            loads.append(name)
+
+        def get_sentence_embedding_dimension(self):
+            return 384
+
+    monkeypatch.setattr(rp, "SentenceTransformer", FakeModel)
+    monkeypatch.setattr(rp, "_MODELS", {}, raising=False)
+    a, b = rp.RetrieverPipeline("m"), rp.RetrieverPipeline("m")
+    assert loads == ["m"]
+    assert a.model is b.model

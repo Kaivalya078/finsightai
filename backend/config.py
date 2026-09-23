@@ -93,8 +93,10 @@ class Settings(BaseSettings):
     HF_CACHE_URL: str = ""
     HF_PDF_BASE_URL: str = ""
 
-    # Uploads
+    # Uploads — each session holds its own in-memory index until evicted
     UPLOAD_MAX_MB: int = 25
+    SESSION_MAX: int = 5
+    SESSION_TTL_SECONDS: int = 3600
 
     # Rate limits (limits-library syntax). Anonymous callers get a daily trial.
     ANON_FREE_QUESTIONS: int = 5
