@@ -209,3 +209,56 @@ def test_login_is_rate_limited_per_ip(limited, monkeypatch):
              for _ in range(11)]
     assert codes[:10] == [401] * 10
     assert codes[10] == 429
+
+
+# ---------------------------------------------------------------------------
+# Index tarball bootstrap (ASSET_MODE=remote)
+# ---------------------------------------------------------------------------
+
+import io
+import tarfile
+
+
+def _tarball(members):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+@pytest.fixture
+def remote_assets(monkeypatch):
+    import asset_manager
+    served = {}
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size): yield served["bytes"]
+
+    monkeypatch.setattr(asset_manager.settings, "ASSET_MODE", "remote")
+    monkeypatch.setattr(asset_manager.settings, "HF_CACHE_URL", "https://example.test/idx.tar.gz")
+    monkeypatch.setattr(asset_manager.requests, "get", lambda *a, **k: FakeResponse())
+    return asset_manager, served
+
+
+def test_remote_index_lands_in_configured_dir(remote_assets, tmp_path):
+    asset_manager, served = remote_assets
+    served["bytes"] = _tarball({"index_cache/faiss.index": b"idx", "index_cache/chunks.pkl": b"c"})
+    cache_dir = tmp_path / "data" / "index_cache"
+    asset_manager.ensure_index_cache(str(cache_dir))
+    assert (cache_dir / "faiss.index").read_bytes() == b"idx"
+
+
+def test_tarball_cannot_write_outside_its_dir(remote_assets, tmp_path):
+    asset_manager, served = remote_assets
+    served["bytes"] = _tarball({"../../evil.txt": b"pwned", "faiss.index": b"idx"})
+    cache_dir = tmp_path / "a" / "index_cache"
+    with pytest.raises(tarfile.TarError):
+        asset_manager.ensure_index_cache(str(cache_dir))
+    assert not list(tmp_path.rglob("evil.txt"))
+    assert not cache_dir.exists()

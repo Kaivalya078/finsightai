@@ -331,6 +331,7 @@ async def lifespan(app: FastAPI):
     corpus_manager = CorpusManager(pipeline)
 
     # --- Read-only cache load ---
+    ensure_index_cache(cache_dir)  # remote mode: download before checking for it
     if not os.path.exists(cache_dir):
         raise RuntimeError(
             f"Cache directory '{cache_dir}' does not exist. "
@@ -341,7 +342,6 @@ async def lifespan(app: FastAPI):
         clean_cache(cache_dir)
 
     # Step 1: Load FAISS index
-    ensure_index_cache()
     if not pipeline.load_index(cache_dir):
         raise RuntimeError(
             f"Failed to load FAISS index from '{cache_dir}'. "

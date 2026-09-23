@@ -35,3 +35,8 @@ itsdangerous>=2.1.0
 
 # Rate limiting
 slowapi>=0.1.9
+# Index bootstrap (asset_manager.py)
+requests>=2.31.0
+
+# Tests
+pytest>=8.0.0
