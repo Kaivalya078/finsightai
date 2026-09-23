@@ -358,6 +358,7 @@ export default function ChatPage() {
                                 <div className="chat-welcome-prompts">
                                     <h3>Suggested questions</h3>
                                     <div className="chat-prompt-cards">
+                                        {/* Must match SHOWCASE_QUESTIONS in backend/main.py (pre-warmed, instant) */}
                                         {[
                                             { icon: <BarChart2 size={15} />, text: 'Compare TCS and Infosys revenue and profit' },
                                             { icon: <TrendingUp size={15} />, text: 'What are the key risk factors?' },

@@ -323,3 +323,20 @@ def test_pdf_url_prefers_object_storage(monkeypatch):
     assert pdf_url_for(colab) == "https://pdfs.example.com/TCS/2024.pdf"
     monkeypatch.setattr(settings, "HF_PDF_BASE_URL", "")
     assert pdf_url_for(r"C:\repo\backend\data\TCS\2024.pdf") == "/pdfs/TCS/2024.pdf"
+
+
+# ---------------------------------------------------------------------------
+# Showcase pre-warm: the landing page's suggested questions answer instantly
+# ---------------------------------------------------------------------------
+
+def test_showcase_questions_are_prewarmed_and_never_expire(fake_pipeline, monkeypatch):
+    import core.response_cache as rc
+    main, _ = fake_pipeline
+    main.prewarm_showcase()
+    later = rc.time.time() + main.settings.CACHE_TTL_SECONDS + 1
+    monkeypatch.setattr(rc.time, "time", lambda: later)
+    for q in main.SHOWCASE_QUESTIONS:
+        assert main.response_cache.get(q) is not None, q
+    main.response_cache.set("ordinary question", {"answer": "x"})
+    monkeypatch.setattr(rc.time, "time", lambda: later + main.settings.CACHE_TTL_SECONDS + 1)
+    assert main.response_cache.get("ordinary question") is None

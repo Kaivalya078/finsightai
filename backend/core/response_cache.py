@@ -84,8 +84,8 @@ class ResponseCache:
 
             entry = self._cache[key]
 
-            # Check TTL
-            if time.time() - entry["_cached_at"] > self._ttl:
+            # Check TTL (pinned entries have no expiry)
+            if entry["_expires_at"] is not None and time.time() > entry["_expires_at"]:
                 del self._cache[key]
                 self._misses += 1
                 return None
@@ -97,11 +97,13 @@ class ResponseCache:
             logger.debug("Cache HIT for query: '%s...'", query[:40])
             return entry["response"]
 
-    def set(self, query: str, response: Dict, session_id: str = None) -> None:
+    def set(self, query: str, response: Dict, session_id: str = None,
+            pin: bool = False) -> None:
         """
         Store a response in the cache.
 
-        Evicts the least recently used entry if cache is full.
+        Evicts the least recently used entry if cache is full. pin=True skips
+        the TTL (showcase answers; the corpus doesn't change between deploys).
         """
         if not self._enabled:
             return
@@ -119,7 +121,7 @@ class ResponseCache:
 
             self._cache[key] = {
                 "response": response,
-                "_cached_at": time.time(),
+                "_expires_at": None if pin else time.time() + self._ttl,
             }
 
     def invalidate_all(self) -> int:

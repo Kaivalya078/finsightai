@@ -16,6 +16,7 @@ import time
 import shutil
 import logging
 import tempfile
+import threading
 from uuid import uuid4
 from typing import List, Optional
 from contextlib import asynccontextmanager
@@ -392,6 +393,9 @@ async def lifespan(app: FastAPI):
     else:
         print("⚠️  Intelligent parsing disabled — using rule-based parser")
 
+    if llm_client.is_configured:
+        threading.Thread(target=prewarm_showcase, daemon=True).start()
+
     elapsed = time.time() - start_time
     print(f"\n✅ Corpus loaded in {elapsed:.2f}s "
           f"({pipeline.index.ntotal} vectors, "
@@ -756,6 +760,25 @@ def retrieve(request: Request, body: RetrieveRequest):
 # =============================================================================
 # PHASE 2: CHAT ENDPOINT (RAG Generation)
 # =============================================================================
+
+# The suggested questions on the chat welcome screen (frontend ChatPage.jsx).
+# Keep the two lists identical: a pinned cache hit needs the exact text.
+SHOWCASE_QUESTIONS = [
+    "Compare TCS and Infosys revenue and profit",
+    "What are the key risk factors?",
+    "Who are the promoters and their shareholding?",
+    "Summarise the financial highlights",
+]
+
+
+def prewarm_showcase() -> None:
+    """Answer the showcase questions once and pin them, so a visitor's first click is instant."""
+    for q in SHOWCASE_QUESTIONS:
+        try:
+            response_cache.set(q, answer_question(q), pin=True)
+        except Exception as e:
+            print(f"⚠️  Pre-warm failed for '{q}': {e}")
+
 
 # Query intent (rule-based or intelligent parser) → intent_prompts.py template
 _STRUCTURED_PROMPTS = {"comparison": "compare", "compare": "compare",
