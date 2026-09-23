@@ -22,6 +22,7 @@ from core.metadata_schema import RetrievalResult
 from core.lookup_index import RetrievalScope
 from query.search_plan import SearchPlan, SubQuery, MergeStrategy
 from core.corpus_manager import CorpusManager
+from config import settings
 
 
 # =============================================================================
@@ -87,7 +88,9 @@ class TestSingle:
         out = cm.execute_plan(plan, fixed_embed)
         assert out == expected
 
-    def test_trims_to_final_top_k(self):
+    def test_trims_to_retrieval_k(self, monkeypatch):
+        """Trim to RETRIEVAL_K (the reranker's pool), not final_top_k."""
+        monkeypatch.setattr(settings, "RETRIEVAL_K", 5)
         cm = make_cm()
         cm.search = MagicMock(return_value=make_results("A", 10))
 
@@ -97,7 +100,7 @@ class TestSingle:
             final_top_k=3,
         )
         out = cm.execute_plan(plan, fixed_embed)
-        assert len(out) == 3
+        assert len(out) == 5
 
     def test_empty_subquery_results(self):
         cm = make_cm()
@@ -139,7 +142,8 @@ class TestInterleaved:
             "A_snippet_2", "B_snippet_2",
         ]
 
-    def test_caps_at_final_top_k(self):
+    def test_caps_at_retrieval_k(self, monkeypatch):
+        monkeypatch.setattr(settings, "RETRIEVAL_K", 4)
         cm = make_cm()
         cm.search = MagicMock(side_effect=[
             make_results("A", 5),
@@ -149,7 +153,7 @@ class TestInterleaved:
         plan = SearchPlan(
             sub_queries=[make_sub("A"), make_sub("B")],
             merge_strategy=MergeStrategy.INTERLEAVED,
-            final_top_k=4,
+            final_top_k=2,
         )
         out = cm.execute_plan(plan, fixed_embed)
         assert len(out) == 4
@@ -213,7 +217,8 @@ class TestSectioned:
         assert out[2].chunk_id == "[infy]:chunk_0"
         assert out[3].chunk_id == "[infy]:chunk_1"
 
-    def test_sequential_fill_then_cap(self):
+    def test_sequential_fill_then_cap(self, monkeypatch):
+        monkeypatch.setattr(settings, "RETRIEVAL_K", 3)
         cm = make_cm()
         cm.search = MagicMock(side_effect=[
             make_results("A", 5),
@@ -223,7 +228,7 @@ class TestSectioned:
         plan = SearchPlan(
             sub_queries=[make_sub("A"), make_sub("B")],
             merge_strategy=MergeStrategy.SECTIONED,
-            final_top_k=3,
+            final_top_k=1,
         )
         out = cm.execute_plan(plan, fixed_embed)
 

@@ -186,8 +186,11 @@ class TestDualCorpus(unittest.TestCase):
         scores = [r.score for r in results]
         self.assertEqual(scores, [0.9, 0.8, 0.5, 0.4])
 
-    def test_trims_to_scope_top_k(self):
-        """Per-SubQuery results should be trimmed to scope.top_k."""
+    def test_trims_to_retrieval_k(self):
+        """Merged global+session results are trimmed to RETRIEVAL_K (the
+        reranker's candidate pool), not scope.top_k or final_top_k."""
+        from unittest.mock import patch
+        from config import settings
         g = make_results("g", [0.9, 0.7, 0.5])
         s = make_results("s", [0.8, 0.6, 0.4])
         router = self._setup_router(g, s)
@@ -197,8 +200,9 @@ class TestDualCorpus(unittest.TestCase):
             merge_strategy=MergeStrategy.SINGLE,
             final_top_k=3,
         )
-        results = router.execute_plan(plan, fixed_embed, session_id="s1")
-        self.assertEqual(len(results), 3)
+        with patch.object(settings, "RETRIEVAL_K", 4):
+            results = router.execute_plan(plan, fixed_embed, session_id="s1")
+        self.assertEqual([r.score for r in results], [0.9, 0.8, 0.7, 0.6])
 
     def test_interleaved_strategy(self):
         """INTERLEAVED should round-robin across SubQueries."""
