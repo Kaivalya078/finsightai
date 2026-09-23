@@ -700,214 +700,138 @@ def retrieve(request: RetrieveRequest):
 # PHASE 2: CHAT ENDPOINT (RAG Generation)
 # =============================================================================
 
-@app.post(
-    "/chat",
-    response_model=ChatResponse,
-    tags=["Generation"],
-    summary="RAG Chat",
-    description="Ask a question and get an AI-generated answer grounded in the document."
-)
-def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+def answer_question(question: str, session_id: Optional[str] = None,
+                    top_k: Optional[int] = None) -> dict:
     """
-    Phase 2: RAG Chat endpoint — now with JWT auth and MongoDB persistence.
+    Run the RAG pipeline, or serve it from the response cache.
 
-    RAG pipeline is IDENTICAL to before.  After the answer is generated,
-    messages are persisted to MongoDB (either new conversation or appended
-    to an existing one identified by conversation_id).
+    Returns a user-independent payload (answer, citations, evidence, metadata,
+    follow_ups). The prompt carries no per-user context, so one cached answer is
+    correct for everyone — which is why conversation_id is never part of it.
+    Raises KeyError / ValueError / RuntimeError from the pipeline.
     """
-    global corpus_manager, llm_client, corpus_router
+    cached = response_cache.get(question, session_id)
+    if cached:
+        print(f"⚡ Cache HIT for: '{question[:60]}...'")
+        return {**cached, "metadata": {**cached.get("metadata", {}), "cached": True}}
 
-    user_id = current_user["user_id"]
-
-    # --- Guard: Check corpus ---
-    if corpus_manager is None or not corpus_manager.is_indexed:
-        raise HTTPException(
-            status_code=503,
-            detail="No document indexed. Please ensure PDF_PATH is set correctly and restart the server."
-        )
-
-    # --- Guard: Check OpenAI client ---
-    if llm_client is None or not llm_client.is_configured:
-        raise HTTPException(
-            status_code=503,
-            detail="OpenAI API key is not configured. Please set OPENAI_API_KEY in your .env file and restart the server."
-        )
-
-    # Initialize tracking and defaults
     tracker = LatencyTracker()
+    top_k = top_k if top_k is not None else settings.TOP_K
     final_k = settings.FINAL_K
     intent = "lookup"
-    confidence = 0.0
     parsed = None
 
-    # Get top_k
-    top_k = request.top_k if request.top_k is not None else settings.TOP_K
-
-    # --- Response cache: return instantly for repeated queries ---
-    cached = response_cache.get(request.question, request.session_id)
-    if cached:
-        print(f"⚡ Cache HIT for: '{request.question[:60]}...'")
-        cached_metadata = cached.get("metadata", {})
-        return ChatResponse(
-            answer=cached.get("answer", ""),
-            citations=cached.get("citations", []),
-            evidence=[EvidenceItem(**e) for e in cached.get("evidence", [])],
-            conversation_id=cached.get("conversation_id"),
-            metadata={**cached_metadata, "cached": True},
-            follow_ups=cached.get("follow_ups", []),
-        )
-
-    try:
-        if request.session_id is not None:
-            # Session path: build plan manually, route through corpus_router
-            print(f"\n💬 Chat request (session {request.session_id[:8]}...): "
-                  f"'{request.question[:60]}...'")
-            with tracker.track("retrieval"):
-                entities = corpus_manager.list_available_entities()
-                companies = entities.get("companies", [])
-                parsed = parse_query(request.question, companies)
-                plan = build_plan(parsed, top_k)
-                results = corpus_router.execute_plan(
-                    plan,
-                    embed_query=lambda q: pipeline.embed_query(q),
-                    session_id=request.session_id,
-                )
-
-            with tracker.track("reranking"):
-                results = refine_results(
-                    results=results,
-                    query=request.question,
-                    parsed_query=parsed,
-                    all_chunks=pipeline.chunks,
-                    chunk_metadata=corpus_manager.chunk_metadata,
-                    final_k=final_k,
-                )
-
-            context, chunk_ids = build_context(results)
-
-        elif is_intelligent_parsing_enabled():
-            # Phase 4: Intelligent retrieval pipeline
-            print(f"\n🧠 Chat request (Phase 4): '{request.question[:60]}...'")
-            with tracker.track("intelligent_retrieve"):
-                step_results, iq = intelligent_retrieve(
-                    raw_query=request.question,
-                    corpus_manager=corpus_manager,
-                    embed_query=lambda q: pipeline.embed_query(q),
-                    pipeline=pipeline,
-                    default_top_k=top_k,
-                )
-
-            intent = iq.intent
-            parse_method = iq.parse_method
-            print(f"   Intent: {iq.intent} | Complexity: {iq.complexity} | "
-                  f"Strategy: {iq.retrieval_strategy} | Parse: {iq.parse_method}")
-
-            with tracker.track("context_assembly"):
-                context, chunk_ids = assemble_context(step_results, intent=iq.intent)
-
-            results = []
-            for step_r in step_results.values():
-                results.extend(step_r)
-
-        else:
-            # Global-only path: use standard orchestrator
-            print(f"\n💬 Chat request: '{request.question[:60]}...'")
-            with tracker.track("retrieval"):
-                results, parsed = retrieve_context(
-                    raw_query=request.question,
-                    corpus_manager=corpus_manager,
-                    embed_query=lambda q: pipeline.embed_query(q),
-                    default_top_k=top_k,
-                )
-            
-            if parsed:
-                intent = parsed.get("intent", "lookup") if isinstance(parsed, dict) else getattr(parsed, "intent", "lookup")
-            
-            with tracker.track("reranking"):
-                results = refine_results(
-                    results=results,
-                    query=request.question,
-                    parsed_query=parsed,
-                    all_chunks=pipeline.chunks,
-                    chunk_metadata=corpus_manager.chunk_metadata,
-                    final_k=final_k,
-                )
-
-            context, chunk_ids = build_context(results)
-
-        # STEP 3: Build the prompt (system + user message)
-        system_prompt, user_message = build_prompt(context, request.question)
-
-        # STEP 4: Generate answer via OpenAI
-        print(f"🤖 Generating answer with {llm_client.model}...")
-        raw_answer = llm_client.generate(system_prompt, user_message)
-
-        # STEP 4b: Extract follow-up suggestions from LLM output
-        answer, follow_ups = extract_follow_ups(raw_answer)
-
-        # STEP 5: Extract citations from the answer
-        citations = extract_citations(answer, chunk_ids)
-
-        # STEP 5b: Compute confidence score
-        confidence, conf_label = compute_confidence(results, answer, request.question, citations)
-
-        # STEP 6: Build evidence list (with full source citation info)
-        evidence = [
-            EvidenceItem(
-                chunk_id=r.chunk_id,
-                snippet=r.snippet,
-                page_number=r.page_number,
-                document_label=r.document_label,
-                pdf_url=r.pdf_url,
+    if session_id is not None:
+        # Session path: build plan manually, route through corpus_router
+        print(f"\n💬 Chat request (session {session_id[:8]}...): '{question[:60]}...'")
+        with tracker.track("retrieval"):
+            entities = corpus_manager.list_available_entities()
+            companies = entities.get("companies", [])
+            parsed = parse_query(question, companies)
+            plan = build_plan(parsed, top_k)
+            results = corpus_router.execute_plan(
+                plan,
+                embed_query=lambda q: pipeline.embed_query(q),
+                session_id=session_id,
             )
-            for r in results
-        ]
-        # ====== END RAG PIPELINE ======
 
-        total_ms = tracker.get_total_ms()
-        breakdown = tracker.get_breakdown()
-        latency_stats.record(breakdown)
+        with tracker.track("reranking"):
+            results = refine_results(
+                results=results,
+                query=question,
+                parsed_query=parsed,
+                all_chunks=pipeline.chunks,
+                chunk_metadata=corpus_manager.chunk_metadata,
+                final_k=final_k,
+            )
 
-        top_score = max((r.score for r in results), default=0.0)
+        context, chunk_ids = build_context(results)
 
-        print(
-            f"✅ Answer generated ({len(citations)} citations, "
-            f"intent={intent}, confidence={confidence:.2f}, "
-            f"latency={total_ms:.0f}ms)"
-        )
+    elif is_intelligent_parsing_enabled():
+        # Phase 4: Intelligent retrieval pipeline
+        print(f"\n🧠 Chat request (Phase 4): '{question[:60]}...'")
+        with tracker.track("intelligent_retrieve"):
+            step_results, iq = intelligent_retrieve(
+                raw_query=question,
+                corpus_manager=corpus_manager,
+                embed_query=lambda q: pipeline.embed_query(q),
+                pipeline=pipeline,
+                default_top_k=top_k,
+            )
 
-        # --- Persist conversation to MongoDB ---
-        now_iso = datetime.now(timezone.utc).isoformat()
-        user_msg = {
-            "role": "user",
-            "content": request.question,
-            "metadata": {},
-            "timestamp": now_iso,
-        }
-        assistant_msg = {
-            "role": "assistant",
-            "content": answer,
-            "metadata": {
-                "citations": citations,
-                "evidence": [e.model_dump() for e in evidence],
-            },
-            "timestamp": now_iso,
-        }
+        intent = iq.intent
+        print(f"   Intent: {iq.intent} | Complexity: {iq.complexity} | "
+              f"Strategy: {iq.retrieval_strategy} | Parse: {iq.parse_method}")
 
-        conv_id = request.conversation_id
-        try:
-            if conv_id:
-                # Append to existing conversation
-                db_append_to_conversation(conv_id, user_id, user_msg, assistant_msg)
-            else:
-                # Create new conversation (title = first 60 chars of question)
-                title = request.question[:60] + ("..." if len(request.question) > 60 else "")
-                conv_id = db_create_conversation(user_id, title, user_msg, assistant_msg)
-        except Exception as persist_err:
-            # Don't fail the request if persistence fails — log and continue
-            print(f"⚠️  Conversation persistence error: {persist_err}")
+        with tracker.track("context_assembly"):
+            context, chunk_ids = assemble_context(step_results, intent=iq.intent)
 
-        pipeline_metadata = {
+        results = []
+        for step_r in step_results.values():
+            results.extend(step_r)
+
+    else:
+        # Global-only path: use standard orchestrator
+        print(f"\n💬 Chat request: '{question[:60]}...'")
+        with tracker.track("retrieval"):
+            results, parsed = retrieve_context(
+                raw_query=question,
+                corpus_manager=corpus_manager,
+                embed_query=lambda q: pipeline.embed_query(q),
+                default_top_k=top_k,
+            )
+
+        if parsed:
+            intent = parsed.get("intent", "lookup") if isinstance(parsed, dict) else getattr(parsed, "intent", "lookup")
+
+        with tracker.track("reranking"):
+            results = refine_results(
+                results=results,
+                query=question,
+                parsed_query=parsed,
+                all_chunks=pipeline.chunks,
+                chunk_metadata=corpus_manager.chunk_metadata,
+                final_k=final_k,
+            )
+
+        context, chunk_ids = build_context(results)
+
+    # Build the prompt and generate
+    system_prompt, user_message = build_prompt(context, question)
+    print(f"🤖 Generating answer with {llm_client.model}...")
+    raw_answer = llm_client.generate(system_prompt, user_message)
+
+    answer, follow_ups = extract_follow_ups(raw_answer)
+    citations = extract_citations(answer, chunk_ids)
+    confidence, conf_label = compute_confidence(results, answer, question, citations)
+
+    evidence = [
+        EvidenceItem(
+            chunk_id=r.chunk_id,
+            snippet=r.snippet,
+            page_number=r.page_number,
+            document_label=r.document_label,
+            pdf_url=r.pdf_url,
+        ).model_dump()
+        for r in results
+    ]
+
+    total_ms = tracker.get_total_ms()
+    breakdown = tracker.get_breakdown()
+    latency_stats.record(breakdown)
+    top_score = max((r.score for r in results), default=0.0)
+
+    print(
+        f"✅ Answer generated ({len(citations)} citations, "
+        f"intent={intent}, confidence={confidence:.2f}, "
+        f"latency={total_ms:.0f}ms)"
+    )
+
+    payload = {
+        "answer": answer,
+        "citations": citations,
+        "evidence": evidence,
+        "metadata": {
             "confidence": confidence,
             "confidence_label": conf_label,
             "intent": intent,
@@ -917,32 +841,58 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
             "top_score": round(top_score, 3),
             "cached": False,
             "model": llm_client.model,
-        }
+        },
+        "follow_ups": follow_ups,
+    }
+    response_cache.set(question, payload, session_id)
+    return payload
 
-        response_data = ChatResponse(
-            answer=answer,
-            citations=citations,
-            evidence=evidence,
-            conversation_id=conv_id,
-            metadata=pipeline_metadata,
-            follow_ups=follow_ups,
+
+def persist_exchange(user_id: str, conversation_id: Optional[str],
+                     question: str, payload: dict) -> Optional[str]:
+    """Save the Q/A pair to the user's conversation; returns its id."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    user_msg = {"role": "user", "content": question, "metadata": {}, "timestamp": now_iso}
+    assistant_msg = {
+        "role": "assistant",
+        "content": payload["answer"],
+        "metadata": {"citations": payload["citations"], "evidence": payload["evidence"]},
+        "timestamp": now_iso,
+    }
+    try:
+        if conversation_id:
+            db_append_to_conversation(conversation_id, user_id, user_msg, assistant_msg)
+        else:
+            title = question[:60] + ("..." if len(question) > 60 else "")
+            conversation_id = db_create_conversation(user_id, title, user_msg, assistant_msg)
+    except Exception as persist_err:
+        # Don't fail the request if persistence fails — log and continue
+        print(f"⚠️  Conversation persistence error: {persist_err}")
+    return conversation_id
+
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    tags=["Generation"],
+    summary="RAG Chat",
+    description="Ask a question and get an AI-generated answer grounded in the document."
+)
+def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+    """Answer (fresh or cached), then persist to the caller's conversation."""
+    if corpus_manager is None or not corpus_manager.is_indexed:
+        raise HTTPException(
+            status_code=503,
+            detail="No document indexed. Please ensure PDF_PATH is set correctly and restart the server."
+        )
+    if llm_client is None or not llm_client.is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI API key is not configured. Please set OPENAI_API_KEY in your .env file and restart the server."
         )
 
-        # --- Cache the successful response ---
-        response_cache.set(
-            request.question,
-            {
-                "answer": answer,
-                "citations": citations,
-                "evidence": [e.model_dump() for e in evidence],
-                "metadata": pipeline_metadata,
-                "follow_ups": follow_ups,
-            },
-            request.session_id,
-        )
-
-        return response_data
-
+    try:
+        payload = answer_question(request.question, request.session_id, request.top_k)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -950,10 +900,12 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Generation error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Generation error: {str(e)}")
+
+    conv_id = persist_exchange(
+        current_user["user_id"], request.conversation_id, request.question, payload
+    )
+    return ChatResponse(**payload, conversation_id=conv_id)
 
 
 # =============================================================================
