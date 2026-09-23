@@ -95,11 +95,8 @@ from core.latency_tracker import LatencyTracker, latency_stats
 # Phase 7: Query logging
 from core.query_logger import log_query, get_query_stats, get_recent_logs
 
-# Configuration
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+from config import settings
+from auth import JWT_SECRET
 
 
 # =============================================================================
@@ -316,7 +313,7 @@ async def lifespan(app: FastAPI):
 
     start_time = time.time()
 
-    cache_dir = os.getenv("INDEX_CACHE_DIR", "index_cache")
+    cache_dir = settings.INDEX_CACHE_DIR
 
     # Initialize the retrieval pipeline
     pipeline = RetrieverPipeline()
@@ -370,7 +367,7 @@ async def lifespan(app: FastAPI):
 
     # Phase 2: Initialize cross-encoder reranker
     if init_reranker():
-        print("🔄 Reranker loaded: " + os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base"))
+        print("🔄 Reranker loaded: " + settings.RERANKER_MODEL)
     else:
         print("⚠️  Reranker disabled or failed to load — using FAISS-only ranking")
 
@@ -439,7 +436,7 @@ This API provides semantic search and AI-powered Q&A over Indian financial docum
 
 # Add CORS middleware (allows frontend to call this API)
 # Set ALLOWED_ORIGINS in production to restrict access
-_allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+_allowed_origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",")]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
@@ -451,7 +448,7 @@ app.add_middleware(
 # Session middleware — required by Authlib for OAuth state (CSRF protection)
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.getenv("JWT_SECRET", "change-me-to-a-strong-random-secret"),
+    secret_key=JWT_SECRET,
 )
 
 # Google OAuth router
@@ -637,10 +634,10 @@ def retrieve(request: RetrieveRequest):
         )
 
     # Get top_k (use request value or default from env)
-    top_k = request.top_k if request.top_k is not None else int(os.getenv("TOP_K", 5))
+    top_k = request.top_k if request.top_k is not None else settings.TOP_K
 
     try:
-        final_k = int(os.getenv("FINAL_K", str(top_k)))
+        final_k = settings.FINAL_K
         parsed = None
 
         if request.session_id is not None:
@@ -738,13 +735,13 @@ def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
 
     # Initialize tracking and defaults
     tracker = LatencyTracker()
-    final_k = int(os.getenv("FINAL_K", str(request.top_k or int(os.getenv("TOP_K", 5)))))
+    final_k = settings.FINAL_K
     intent = "lookup"
     confidence = 0.0
     parsed = None
 
     # Get top_k
-    top_k = request.top_k if request.top_k is not None else int(os.getenv("TOP_K", 5))
+    top_k = request.top_k if request.top_k is not None else settings.TOP_K
 
     # --- Response cache: return instantly for repeated queries ---
     cached = response_cache.get(request.question, request.session_id)

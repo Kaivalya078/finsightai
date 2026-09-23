@@ -19,7 +19,7 @@ openai>=1.0.0
 rank-bm25>=0.2.2
 
 # Configuration
-python-dotenv>=1.0.0
+pydantic-settings>=2.0.0
 python-multipart
 
 # Auth + Database

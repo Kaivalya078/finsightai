@@ -28,10 +28,7 @@ from datetime import datetime
 # Add backend root to path so package imports work when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Load environment before anything else
-from dotenv import load_dotenv
-load_dotenv()
-
+from config import settings
 from core.retriever_pipeline import RetrieverPipeline
 from core.corpus_manager import CorpusManager
 from core.cache_utils import has_leftover_tmp, clean_cache
@@ -56,22 +53,22 @@ Examples:
     )
     parser.add_argument(
         "--company",
-        default=os.getenv("DEFAULT_COMPANY", "demo_company"),
+        default=settings.DEFAULT_COMPANY or "demo_company",
         help="Company identifier (default: from .env or 'demo_company')",
     )
     parser.add_argument(
         "--type",
-        default=os.getenv("DEFAULT_DOC_TYPE", "DRHP"),
+        default=settings.DEFAULT_DOC_TYPE or "DRHP",
         help="Document type: DRHP, Annual_Report, etc. (default: from .env)",
     )
     parser.add_argument(
         "--year",
-        default=os.getenv("DEFAULT_YEAR", "2024"),
+        default=settings.DEFAULT_YEAR or "2024",
         help="Fiscal year/period (default: from .env or '2024')",
     )
     parser.add_argument(
         "--cache-dir",
-        default=os.getenv("INDEX_CACHE_DIR", "index_cache"),
+        default=settings.INDEX_CACHE_DIR,
         help="Cache directory (default: from .env or 'index_cache')",
     )
     

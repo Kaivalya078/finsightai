@@ -11,7 +11,7 @@ Author: FinSight AI Team
 Phase: 2 (Retrieval Precision Layer)
 """
 
-import os
+from config import settings
 import logging
 from typing import List, Dict, Optional, Set
 from collections import Counter
@@ -59,9 +59,9 @@ def boost_by_metadata(
         return results
 
     # Read boost weights from env (user-approved defaults)
-    company_boost = float(os.getenv("BOOST_COMPANY", "0.08"))
-    year_boost = float(os.getenv("BOOST_YEAR", "0.04"))
-    doctype_boost = float(os.getenv("BOOST_DOCTYPE", "0.03"))
+    company_boost = settings.BOOST_COMPANY
+    year_boost = settings.BOOST_YEAR
+    doctype_boost = settings.BOOST_DOCTYPE
 
     boosted = []
     for r in results:
@@ -153,8 +153,8 @@ def deduplicate(
     if not results:
         return results
 
-    threshold = similarity_threshold or float(os.getenv("DEDUP_THRESHOLD", "0.85"))
-    max_frac = max_from_one_doc or float(os.getenv("MAX_FROM_ONE_DOC", "0.6"))
+    threshold = similarity_threshold or settings.DEDUP_THRESHOLD
+    max_frac = max_from_one_doc or settings.MAX_FROM_ONE_DOC
 
     # ── Pass 1: Near-duplicate removal ──
     # Iterate in score order; skip chunks too similar to any already-accepted chunk
@@ -231,12 +231,12 @@ def enrich_context(
     Returns:
         List of RetrievalResult with potentially expanded snippets
     """
-    ctx_window = window if window is not None else int(os.getenv("CONTEXT_WINDOW", "0"))
+    ctx_window = window if window is not None else settings.CONTEXT_WINDOW
 
     if ctx_window == 0 or not results or not all_chunks:
         return results
 
-    max_merged_chars = int(os.getenv("CHUNK_SIZE", "1000")) * 2
+    max_merged_chars = settings.CHUNK_SIZE * 2
 
     enriched = []
     for r in results:

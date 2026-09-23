@@ -12,17 +12,13 @@ Author: FinSight AI Team
 Phase: 2 (Generation Layer)
 """
 
-import os
+from config import settings
 from typing import Optional
 
 # OpenAI SDK (v1+)
 from openai import OpenAI, AuthenticationError, RateLimitError, APIError
 
-# Configuration
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
 
 
 # =============================================================================
@@ -52,15 +48,15 @@ class OpenAIClient:
         Does NOT crash if key is missing — instead, sets a flag so the
         /chat endpoint can return a helpful error.
         """
-        self.api_key = os.getenv("OPENAI_API_KEY", "")
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.api_key = settings.OPENAI_API_KEY
+        self.model = settings.OPENAI_MODEL
         
         # Check if API key is configured
         self.is_configured = bool(self.api_key and self.api_key != "your-api-key-here")
         
         if self.is_configured:
             # Initialize the OpenAI client
-            self.client = OpenAI(api_key=self.api_key)
+            self.client = OpenAI(api_key=self.api_key, base_url=settings.OPENAI_BASE_URL or None)
             print(f"🔑 OpenAI client initialized (model: {self.model})")
         else:
             self.client = None

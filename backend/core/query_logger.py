@@ -13,7 +13,7 @@ Author: FinSight AI Team
 Phase: 7 (Evaluation & Monitoring)
 """
 
-import os
+from config import settings
 import json
 import time
 import logging
@@ -72,7 +72,7 @@ def log_query(
         cached:            Whether response was from cache
         error:             Error message if request failed
     """
-    if not os.getenv("QUERY_LOG_ENABLED", "true").lower() == "true":
+    if not settings.QUERY_LOG_ENABLED:
         return
 
     # Update counters

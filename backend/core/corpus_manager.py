@@ -24,6 +24,8 @@ Phase: 2.5 (Corpus Architecture)
 """
 
 import os
+
+from config import settings
 import json
 import logging
 import pickle
@@ -272,7 +274,7 @@ class CorpusManager:
             return []
 
         # Phase 2: Use RETRIEVAL_K for expanded candidate pool (reranker needs more candidates)
-        retrieval_k = int(os.getenv("RETRIEVAL_K", str(scope.top_k * 3)))
+        retrieval_k = settings.RETRIEVAL_K
         candidate_k = retrieval_k
 
         raw = self.retriever.search_scoped(
@@ -319,7 +321,7 @@ class CorpusManager:
 
                     parts = rec.pdf_path.replace("\\", "/").rstrip("/").split("/")
 
-                    asset_mode = os.getenv("ASSET_MODE", "local")
+                    asset_mode = settings.ASSET_MODE
 
                     if asset_mode == "local":
                         if len(parts) >= 2:
@@ -328,7 +330,7 @@ class CorpusManager:
                             pdf_url = f"/pdfs/{parts[-1]}"
 
                     else:
-                        hf_base = os.getenv("HF_PDF_BASE_URL", "").rstrip("/")
+                        hf_base = settings.HF_PDF_BASE_URL.rstrip("/")
 
                         if len(parts) >= 2:
                             pdf_url = f"{hf_base}/{parts[-2]}/{parts[-1]}"
@@ -353,7 +355,7 @@ class CorpusManager:
         # retrieve top_k × N candidates from FAISS, apply threshold,
         # then trim to top_k. This prevents threshold filtering from
         # returning fewer results than expected.
-        threshold = float(os.getenv("SIMILARITY_THRESHOLD", "0.30"))
+        threshold = settings.SIMILARITY_THRESHOLD
         pre_filter_count = len(results)
         results = [r for r in results if r.score >= threshold]
         filtered_count = pre_filter_count - len(results)
@@ -388,7 +390,7 @@ class CorpusManager:
 
         # Phase 2: Use RETRIEVAL_K as merge limit to preserve candidates
         # for the reranker. Final trimming to FINAL_K happens in refine_results().
-        merge_limit = int(os.getenv("RETRIEVAL_K", str(plan.final_top_k)))
+        merge_limit = settings.RETRIEVAL_K
 
         for sub_query in plan.sub_queries:
             vector  = embed_query(sub_query.rewritten_query)

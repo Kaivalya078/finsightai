@@ -16,7 +16,7 @@ Author: FinSight AI Team
 Phase: 4 (Intelligent Query Understanding)
 """
 
-import os
+from config import settings
 import json
 import logging
 import time
@@ -147,7 +147,7 @@ def init_intelligent_parser(openai_client) -> bool:
     """Initialize the intelligent parser with the existing OpenAI client."""
     global _openai_client
 
-    if not os.getenv("INTELLIGENT_PARSING_ENABLED", "true").lower() == "true":
+    if not settings.INTELLIGENT_PARSING_ENABLED:
         logger.info("Intelligent parsing disabled")
         return False
 
@@ -163,7 +163,7 @@ def init_intelligent_parser(openai_client) -> bool:
 def is_intelligent_parsing_enabled() -> bool:
     """Check if LLM-based parsing is available."""
     return (
-        os.getenv("INTELLIGENT_PARSING_ENABLED", "true").lower() == "true"
+        settings.INTELLIGENT_PARSING_ENABLED
         and _openai_client is not None
     )
 

@@ -9,7 +9,6 @@ Handles Google OAuth 2.0 login flow with two endpoints:
 Author: FinSight AI Team
 """
 
-import os
 import json
 import base64
 import logging
@@ -19,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
 from auth import oauth, create_access_token
+from config import settings
 from db import upsert_google_user
 
 logger = logging.getLogger(__name__)
@@ -27,10 +27,8 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-GOOGLE_REDIRECT_URI = os.getenv(
-    "GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/callback"
-)
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+GOOGLE_REDIRECT_URI = settings.GOOGLE_REDIRECT_URI
+FRONTEND_URL = settings.FRONTEND_URL
 
 # ---------------------------------------------------------------------------
 # Router
@@ -48,7 +46,7 @@ async def google_login(request: Request):
     After the user authorizes, Google redirects back to /auth/callback.
     """
     # Verify Google OAuth is configured
-    client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+    client_id = settings.GOOGLE_CLIENT_ID
     if not client_id or client_id.startswith("your_"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -13,6 +13,8 @@ Phase: 1 (Retrieval Only)
 """
 
 import os
+
+from config import settings
 import json
 import logging
 import pickle
@@ -32,8 +34,6 @@ from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 
-# Configuration
-from dotenv import load_dotenv
 
 # Cache safety utilities
 from .cache_utils import atomic_write_bytes, atomic_write_json, atomic_faiss_write
@@ -41,8 +41,6 @@ from .cache_utils import atomic_write_bytes, atomic_write_json, atomic_faiss_wri
 # Retrieval result data contract (owned by metadata_schema)
 from .metadata_schema import RetrievalResult
 
-# Load environment variables
-load_dotenv()
 
 
 # =============================================================================
@@ -330,7 +328,7 @@ class RetrieverPipeline:
         """
         # Get model name from environment or use default
         if model_name is None:
-            model_name = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+            model_name = settings.EMBEDDING_MODEL
         
         print(f"🤖 Loading embedding model: {model_name}")
         print("   (This may take a minute on first run as the model downloads...)")
@@ -368,8 +366,8 @@ class RetrieverPipeline:
             Number of chunks indexed
         """
         # Get chunking parameters from environment
-        chunk_size = int(os.getenv("CHUNK_SIZE", 500))
-        chunk_overlap = int(os.getenv("CHUNK_OVERLAP", 50))
+        chunk_size = settings.CHUNK_SIZE
+        chunk_overlap = settings.CHUNK_OVERLAP
         
         # STAGE 1: Load PDF
         print("\n" + "="*50)
@@ -451,7 +449,7 @@ class RetrieverPipeline:
         
         # Get top_k from environment if not specified
         if top_k is None:
-            top_k = int(os.getenv("TOP_K", 5))
+            top_k = settings.TOP_K
         
         # Ensure we don't request more results than we have chunks
         top_k = min(top_k, len(self.chunks))
@@ -523,8 +521,8 @@ class RetrieverPipeline:
             FileNotFoundError: If PDF doesn't exist
             ValueError: If PDF is empty or produces no chunks
         """
-        chunk_size = int(os.getenv("CHUNK_SIZE", 500))
-        chunk_overlap = int(os.getenv("CHUNK_OVERLAP", 50))
+        chunk_size = settings.CHUNK_SIZE
+        chunk_overlap = settings.CHUNK_OVERLAP
 
         logger.info("Preparing document: %s", pdf_path)
         pages = load_pdf_pages(pdf_path)
@@ -596,7 +594,7 @@ class RetrieverPipeline:
         Returns:
             Normalized numpy array of shape (1, embedding_dim)
         """
-        instruction = os.getenv("QUERY_INSTRUCTION", "")
+        instruction = settings.QUERY_INSTRUCTION
         return self.embed_texts([query], instruction=instruction if instruction else None)
     
     def append_vectors(
@@ -762,9 +760,9 @@ class RetrieverPipeline:
             "config_fingerprint": self.compute_config_fingerprint(),
             "source_pdf_hash": pdf_hash,
             "source_pdf_path": pdf_path,
-            "embedding_model": os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
-            "chunk_size": int(os.getenv("CHUNK_SIZE", 500)),
-            "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", 50)),
+            "embedding_model": settings.EMBEDDING_MODEL,
+            "chunk_size": settings.CHUNK_SIZE,
+            "chunk_overlap": settings.CHUNK_OVERLAP,
             "num_chunks": len(self.chunks),
             "embedding_dim": self.embedding_dim,
             "chunk_order_sentinel": self.compute_chunk_sentinels(
@@ -876,12 +874,12 @@ class RetrieverPipeline:
         Any change in these values means the cache is incompatible.
         """
         config = {
-            "embedding_model": os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
-            "chunk_size": int(os.getenv("CHUNK_SIZE", 500)),
-            "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", 50)),
+            "embedding_model": settings.EMBEDDING_MODEL,
+            "chunk_size": settings.CHUNK_SIZE,
+            "chunk_overlap": settings.CHUNK_OVERLAP,
             "normalization_version": NORMALIZATION_VERSION,
             "metadata_schema_version": METADATA_SCHEMA_VERSION,
-            "query_instruction": os.getenv("QUERY_INSTRUCTION", ""),
+            "query_instruction": settings.QUERY_INSTRUCTION,
         }
         config_str = json.dumps(config, sort_keys=True)
         return hashlib.sha256(config_str.encode()).hexdigest()
@@ -989,7 +987,7 @@ if __name__ == "__main__":
     print("="*60)
     
     # Get PDF path from environment
-    pdf_path = os.getenv("PDF_PATH", "data/sample.pdf")
+    pdf_path = settings.PDF_PATH
     
     # Check if sample PDF exists
     if not os.path.exists(pdf_path):

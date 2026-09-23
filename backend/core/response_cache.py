@@ -20,7 +20,7 @@ Author: FinSight AI Team
 Phase: 6 (Performance & Production)
 """
 
-import os
+from config import settings
 import time
 import hashlib
 import threading
@@ -45,9 +45,9 @@ class ResponseCache:
     """
 
     def __init__(self):
-        self._enabled = os.getenv("CACHE_ENABLED", "true").lower() == "true"
-        self._max_size = int(os.getenv("CACHE_MAX_SIZE", "500"))
-        self._ttl = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+        self._enabled = settings.CACHE_ENABLED
+        self._max_size = settings.CACHE_MAX_SIZE
+        self._ttl = settings.CACHE_TTL_SECONDS
         self._cache: OrderedDict[str, Dict] = OrderedDict()
         self._lock = threading.Lock()
         self._hits = 0

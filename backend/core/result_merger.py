@@ -20,7 +20,7 @@ Author: FinSight AI Team
 Phase: 3 (Recall Improvement Layer)
 """
 
-import os
+from config import settings
 import logging
 from typing import List, Dict, Optional
 from collections import Counter
@@ -95,8 +95,8 @@ def merge_results(
     if len(non_empty) == 1:
         return non_empty[0][:top_k]
 
-    rrf_k = int(os.getenv("RRF_K", "60"))
-    max_doc_frac = float(os.getenv("MAX_DOC_CONCENTRATION", "0.4"))
+    rrf_k = settings.RRF_K
+    max_doc_frac = settings.MAX_DOC_CONCENTRATION
 
     # ── Phase 1: Compute RRF scores per chunk_id ──
     rrf_scores: Dict[str, float] = {}

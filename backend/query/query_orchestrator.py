@@ -21,7 +21,7 @@ Pipeline (Phase 4):
     → return (step_results, intelligent_query)
 """
 
-import os
+from config import settings
 import logging
 import time
 import asyncio
@@ -91,7 +91,7 @@ def retrieve_context(
     logger.debug("Phase 3: %d query variants: %s", len(query_variants), query_variants)
 
     # ── Step 4: Retrieve for each variant (FAISS + BM25) ──
-    retrieval_k = int(os.getenv("RETRIEVAL_K", "20"))
+    retrieval_k = settings.RETRIEVAL_K
     all_result_lists: List[List[RetrievalResult]] = []
     all_labels: List[str] = []
 
@@ -272,7 +272,7 @@ def intelligent_retrieve(
     logger.debug("Phase 4: %d retrieval steps planned", len(steps))
 
     # ── Step 3: Execute Steps (parallel for multi-step) ──
-    final_k = int(os.getenv("FINAL_K", str(default_top_k)))
+    final_k = settings.FINAL_K
 
     def _execute_step(step: RetrievalStep) -> Tuple[str, List[RetrievalResult]]:
         """Execute a single retrieval step using Phase 3 pipeline."""

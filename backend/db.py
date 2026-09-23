@@ -10,19 +10,17 @@ Collections:
 Author: FinSight AI Team
 """
 
-import os
+from config import settings
 from datetime import datetime, timezone
 from pymongo import MongoClient, ASCENDING, DESCENDING
-from dotenv import load_dotenv
 
-load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------------
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("MONGO_DB_NAME", "finsightai")
+MONGO_URI = settings.MONGO_URI
+DB_NAME = settings.MONGO_DB_NAME
 
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]

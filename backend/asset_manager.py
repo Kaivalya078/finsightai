@@ -2,12 +2,12 @@ import os
 import tarfile
 import requests
 
-ASSET_MODE = os.getenv("ASSET_MODE", "local")
+from config import settings
 
 
 def download_cache():
 
-    cache_url = os.getenv("HF_CACHE_URL")
+    cache_url = settings.HF_CACHE_URL
 
     if not cache_url:
         raise ValueError("HF_CACHE_URL is not set")
@@ -39,7 +39,7 @@ def extract_cache():
 
 def ensure_index_cache():
 
-    if ASSET_MODE == "local":
+    if settings.ASSET_MODE == "local":
         print("Using local assets.")
         return
 

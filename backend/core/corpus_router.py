@@ -26,7 +26,7 @@ Design:
 from __future__ import annotations
 
 import logging
-import os
+from config import settings
 from dataclasses import replace as dc_replace
 from typing import Callable, Dict, List, Optional
 
@@ -127,7 +127,7 @@ class CorpusRouter:
             # This preserves FAISS ranking authority within each source
             merged = _merge_by_score(global_results, session_results)
             # Phase 2: Use RETRIEVAL_K so reranker gets full candidate set
-            merge_limit = int(os.getenv("RETRIEVAL_K", str(sub_query.scope.top_k)))
+            merge_limit = settings.RETRIEVAL_K
             merged = merged[:merge_limit]
 
             per_subquery.append(merged)
@@ -187,7 +187,7 @@ def _apply_merge_strategy(
     reranker receives the full candidate set. Final trim to FINAL_K
     happens in refine_results().
     """
-    merge_limit = int(os.getenv("RETRIEVAL_K", str(plan.final_top_k)))
+    merge_limit = settings.RETRIEVAL_K
 
     if plan.merge_strategy == MergeStrategy.SINGLE:
         return per_subquery[0][:merge_limit]

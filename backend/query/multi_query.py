@@ -22,7 +22,7 @@ Author: FinSight AI Team
 Phase: 3 (Recall Improvement Layer)
 """
 
-import os
+from config import settings
 import logging
 from typing import List, Optional
 
@@ -70,7 +70,7 @@ def init_multi_query(openai_client) -> bool:
     """
     global _openai_client
 
-    if not os.getenv("MULTI_QUERY_ENABLED", "true").lower() == "true":
+    if not settings.MULTI_QUERY_ENABLED:
         logger.info("Multi-query disabled (MULTI_QUERY_ENABLED != true)")
         return False
 
@@ -105,7 +105,7 @@ def generate_multi_queries(
         List of query strings [original, variant_1, variant_2, ...]
         Minimum length: 1 (original only, on failure)
     """
-    total_count = count or int(os.getenv("MULTI_QUERY_COUNT", "3"))
+    total_count = count or settings.MULTI_QUERY_COUNT
     variant_count = total_count - 1  # Subtract 1 for original
 
     # Always include the original
@@ -164,6 +164,6 @@ def generate_multi_queries(
 def is_multi_query_enabled() -> bool:
     """Check if multi-query generation is available and enabled."""
     return (
-        os.getenv("MULTI_QUERY_ENABLED", "true").lower() == "true"
+        settings.MULTI_QUERY_ENABLED
         and _openai_client is not None
     )

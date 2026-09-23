@@ -7,7 +7,6 @@ for extracting the current user from the Authorization header.
 Author: FinSight AI Team
 """
 
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -16,15 +15,21 @@ from jose import jwt, JWTError, ExpiredSignatureError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from authlib.integrations.starlette_client import OAuth
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import settings
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me-to-a-strong-random-secret")
+JWT_SECRET = settings.JWT_SECRET
+# Anyone holding the secret can mint a token for any account, so refuse to run
+# on an empty one or the placeholder that used to be committed as the default.
+if len(JWT_SECRET) < 32 or JWT_SECRET == "change-me-to-a-strong-random-secret":
+    raise RuntimeError(
+        "JWT_SECRET is unset or weak (need 32+ chars). Generate one with: "
+        'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+    )
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
 
@@ -38,8 +43,8 @@ _bearer_scheme = HTTPBearer()
 oauth = OAuth()
 oauth.register(
     name="google",
-    client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
-    client_secret=os.getenv("GOOGLE_CLIENT_SECRET", ""),
+    client_id=settings.GOOGLE_CLIENT_ID,
+    client_secret=settings.GOOGLE_CLIENT_SECRET,
     server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
     client_kwargs={"scope": "openid email profile"},
 )
